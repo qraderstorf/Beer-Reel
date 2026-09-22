@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
-import { Star, MessageSquare, Flame, Trash2, Heart, Search, Filter, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, Pin, X, Flag, MapPin } from "lucide-react";
+import { Star, MessageSquare, Flame, Trash2, Heart, Search, Filter, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, Pin, X, Flag, MapPin, Globe, Users as UsersIcon } from "lucide-react";
 import { BeerLog, UserProfile, isSeymoreBeers, Pub } from "../types";
 import { useRetryImage } from "../utils";
 import UserAvatar from "./UserAvatar";
@@ -37,6 +37,8 @@ interface ActivityFeedProps {
   onUserFilterChange?: (user: string) => void;
   searchTerm?: string;
   onSearchTermChange?: (term: string) => void;
+  feedScope?: "everyone" | "friends";
+  onFeedScopeChange?: (scope: "everyone" | "friends") => void;
   pinnedPubId?: string;
   onPinPub?: (pubId: string) => void;
   onCheersToggled: (id: string) => void;
@@ -440,6 +442,8 @@ export default function ActivityFeed({
   onUserFilterChange,
   searchTerm: propSearchTerm,
   onSearchTermChange,
+  feedScope = "everyone",
+  onFeedScopeChange,
   pinnedPubId,
   onPinPub,
   onCheersToggled,
@@ -974,6 +978,34 @@ export default function ActivityFeed({
 
       {/* Compact Search & Filter Bar */}
       <div className="bg-white dark:bg-slate-900 p-2 sm:p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col gap-2">
+        {/* Feed Scope Toggle - Everyone vs Friends only */}
+        {onFeedScopeChange && (
+          <div className="inline-flex items-center self-start gap-0.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg p-0.5">
+            <button
+              type="button"
+              onClick={() => onFeedScopeChange("everyone")}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
+                feedScope === "everyone"
+                  ? "bg-amber-500 text-slate-950 shadow-sm"
+                  : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+              }`}
+            >
+              <Globe className="w-3 h-3" /> Everyone
+            </button>
+            <button
+              type="button"
+              onClick={() => onFeedScopeChange("friends")}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
+                feedScope === "friends"
+                  ? "bg-amber-500 text-slate-950 shadow-sm"
+                  : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+              }`}
+            >
+              <UsersIcon className="w-3 h-3" /> Friends
+            </button>
+          </div>
+        )}
+
         <div className="flex flex-row gap-2 items-center w-full">
           {/* Search Input */}
           <div className="relative flex-1 min-w-0">
@@ -1060,8 +1092,14 @@ export default function ActivityFeed({
               className="text-center bg-white border border-dashed border-slate-200 rounded-xl py-12 px-6"
             >
               <div className="text-4xl mb-3">🍻</div>
-              <h3 className="text-lg font-bold text-slate-700">No pints found</h3>
-              <p className="text-xs text-slate-400 mt-1">Be the first to log a pint, or try adjusting your search filters!</p>
+              <h3 className="text-lg font-bold text-slate-700">
+                {feedScope === "friends" ? "No pints from friends yet" : "No pints found"}
+              </h3>
+              <p className="text-xs text-slate-400 mt-1">
+                {feedScope === "friends"
+                  ? "Add some friends, or switch to Everyone to see the wider feed."
+                  : "Be the first to log a pint, or try adjusting your search filters!"}
+              </p>
             </motion.div>
           ) : (
             uniqueFilteredLogs.map((log) => {

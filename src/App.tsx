@@ -49,6 +49,16 @@ export default function App() {
     return user ? (localStorage.getItem(`beer_logger_pinned_pub_${user}`) || "") : "";
   });
 
+  // Feed scope - "everyone" (default, so a new account with few/no friends yet
+  // doesn't land on an empty feed) or "friends" (only your own posts + your
+  // friends'). Remembered per-device/per-account so anyone who prefers a
+  // friends-only feed doesn't have to reselect it every visit.
+  const [feedScope, setFeedScope] = useState<"everyone" | "friends">(() => {
+    const user = localStorage.getItem("beer_logger_username") || "";
+    const stored = user ? localStorage.getItem(`beer_logger_feed_scope_${user}`) : null;
+    return stored === "friends" ? "friends" : "everyone";
+  });
+
   const isFilterActive =
     selectedUserFilter !== "all" ||
     (selectedPubId !== "global" && selectedPubId !== "all" && selectedPubId !== "") ||
@@ -126,6 +136,29 @@ export default function App() {
         if (!hasBlockedComment) return log;
         return { ...log, comments: log.comments.filter((c) => !blockedUsernamesLower.has(c.user.toLowerCase())) };
       });
+  };
+
+  const handleFeedScopeChange = (scope: "everyone" | "friends") => {
+    setFeedScope(scope);
+    if (currentUser) {
+      localStorage.setItem(`beer_logger_feed_scope_${currentUser}`, scope);
+    }
+  };
+
+  // Friends-only feed scope: your own posts plus posts from anyone on your
+  // friends list. Applied client-side on top of whatever's already loaded
+  // (global or pub-scoped), same as the search-term filter already works -
+  // no separate friends-scoped query/pagination path needed.
+  const friendUsernamesLower = useMemo(() => {
+    const me = users.find((u) => u.username === currentUser);
+    return new Set((me?.friends || []).map((f) => f.toLowerCase()));
+  }, [users, currentUser]);
+
+  const applyFriendsFilter = (list: BeerLog[]): BeerLog[] => {
+    if (feedScope !== "friends") return list;
+    return list.filter(
+      (log) => log.user.toLowerCase() === currentUser.toLowerCase() || friendUsernamesLower.has(log.user.toLowerCase())
+    );
   };
 
   // Ensure selectedPubId matches an existing pub or fallback to global
@@ -1980,7 +2013,7 @@ export default function App() {
 
               {activeTab === "feed" && (
                 <ActivityFeed
-                  logs={applyBlockFilter(isFilterActive ? filteredBeers : logs)}
+                  logs={applyFriendsFilter(applyBlockFilter(isFilterActive ? filteredBeers : logs))}
                   users={users}
                   currentUser={currentUser}
                   pubs={pubs}
@@ -1988,6 +2021,8 @@ export default function App() {
                   onPubSelect={setSelectedPubId}
                   selectedUserFilter={selectedUserFilter}
                   onUserFilterChange={setSelectedUserFilter}
+                  feedScope={feedScope}
+                  onFeedScopeChange={handleFeedScopeChange}
                   searchTerm={searchTerm}
                   onSearchTermChange={setSearchTerm}
                   pinnedPubId={pinnedPubId}
