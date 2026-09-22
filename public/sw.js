@@ -1,8 +1,8 @@
 importScripts('https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js');
 
-const BUILD_VERSION = "v20260731-1008";
-const CACHE_NAME = `beerreal-cache-${BUILD_VERSION}`;
+const BUILD_VERSION = "v20260918-1633";
+const CACHE_NAME = `beerreel-cache-${BUILD_VERSION}`;
 const ASSETS = [
   "/",
   "/index.html",
@@ -29,6 +29,14 @@ function shouldShowNotification(notifId) {
   return true;
 }
 
+// Set once Firebase Messaging's own onBackgroundMessage handler is actually wired up
+// below. The raw "push" listener further down uses this - not a guess based on the
+// payload's shape - to skip its own display, since FCM's SDK registers its own
+// internal "push" listener and every listener on this event fires for every message.
+// Without a definitive flag here, both listeners could call showNotification() for
+// the same push, which is exactly what was rendering every notification twice.
+let fcmBackgroundHandlerActive = false;
+
 // Initialize Firebase in the service worker for FCM support (prevent duplicate app init error)
 try {
   if (typeof firebase !== 'undefined' && firebase.apps && !firebase.apps.length) {
@@ -44,11 +52,12 @@ try {
 
   if (typeof firebase !== 'undefined' && firebase.messaging) {
     const messaging = firebase.messaging();
+    fcmBackgroundHandlerActive = true;
     messaging.onBackgroundMessage((payload) => {
       console.log("[PWA SW] FCM Background message received:", payload);
       const title = payload.notification?.title || payload.data?.title || "🍻 Pint Alert";
       const body = payload.notification?.body || payload.data?.body || "A cold beer was logged!";
-      const notifId = payload.data?.notificationId || payload.data?.id || payload.notification?.tag || "beerreal-notif-" + (payload.data?.timestamp || Date.now());
+      const notifId = payload.data?.notificationId || payload.data?.id || payload.notification?.tag || "beerreel-notif-" + (payload.data?.timestamp || Date.now());
       
       if (!shouldShowNotification(notifId)) {
         return;
@@ -89,7 +98,7 @@ self.addEventListener("activate", (event) => {
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
-          if (key !== CACHE_NAME && key.startsWith("beerreal-cache-")) {
+          if (key !== CACHE_NAME && key.startsWith("beerreel-cache-")) {
             console.log("[PWA SW] Invalidating old cache version:", key);
             return caches.delete(key);
           }
@@ -195,7 +204,7 @@ self.addEventListener("message", (event) => {
           icon: "/icon-192.png",
           badge: "/icon-192.png",
           vibrate: [100, 50, 100],
-          tag: "beerreal-notification",
+          tag: "beerreel-notification",
           renotify: true,
           ...options
         })
@@ -204,22 +213,23 @@ self.addEventListener("message", (event) => {
   }
 });
 
-// Handle real push event notifications from native Web Push Protocol
+// Fallback handler for the plain Web Push Protocol, for when FCM's own SW support
+// isn't available in this browser/context. Every "push" listener registered on a
+// service worker fires for every message, so this must not run at all when FCM's
+// onBackgroundMessage handler above is already live - otherwise both fire and every
+// notification renders twice.
 self.addEventListener("push", (event) => {
+  if (fcmBackgroundHandlerActive) {
+    return;
+  }
+
   let data = {};
   if (event.data) {
     try {
       data = event.data.json();
     } catch (e) {
-      data = { title: "BeerReal Alert! 🍻", body: event.data.text() };
+      data = { title: "BeerReel Alert! 🍻", body: event.data.text() };
     }
-  }
-
-  // If FCM SDK is registered or payload comes from FCM, FCM's onBackgroundMessage handles it.
-  // Skip duplicate manual show in raw push listener.
-  if (data.from || data.fcmMessageId || data.notification || (typeof firebase !== 'undefined' && firebase.messaging)) {
-    console.log("[PWA SW] Push payload handled by FCM onBackgroundMessage. Skipping manual push listener duplicate.");
-    return;
   }
 
   const notifObj = data.notification || {};
@@ -227,7 +237,7 @@ self.addEventListener("push", (event) => {
 
   const title = notifObj.title || dataObj.title || data.title || "🍻 Pint Alert";
   const body = notifObj.body || dataObj.body || data.body || "A cold beer is calling your name! 🍻";
-  const notifId = dataObj.notificationId || dataObj.id || data.tag || "beerreal-notif-static";
+  const notifId = dataObj.notificationId || dataObj.id || data.tag || "beerreel-notif-static";
 
   if (!shouldShowNotification(notifId)) {
     return;

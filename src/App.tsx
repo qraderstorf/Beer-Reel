@@ -1,20 +1,26 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Beer, BarChart3, Activity, Users, Compass, ChevronDown, Smile, RefreshCw, LogOut, Bell, Smartphone, Database, Cloud, Flame, ShieldAlert, Tag, MessageSquare, Heart, Sparkles } from "lucide-react";
+import { Beer, BarChart3, Activity, Users, Compass, ChevronDown, Smile, RefreshCw, LogOut, Bell, Smartphone, Database, Cloud, Flame, ShieldAlert, Tag, MessageSquare, Heart, Sparkles, UserPlus, UserCheck } from "lucide-react";
 import { BeerLog, UserProfile, AppNotification, Pub } from "./types";
 import { getMostDrankBeerForUser } from "./utils";
 import ActivityFeed from "./components/ActivityFeed";
 import Statistics from "./components/Statistics";
 import UserProfileManager from "./components/UserProfileManager";
 import LoginScreen from "./components/LoginScreen";
+import AgeGate from "./components/AgeGate";
 import PubHub from "./components/PubHub";
 import QuickLogWorkflow from "./components/QuickLogWorkflow";
 import UserAvatar from "./components/UserAvatar";
 import Logo from "./components/Logo";
+import FriendsHub from "./components/FriendsHub";
+import WelcomeCarousel from "./components/WelcomeCarousel";
 import { db, useFirestore } from "./firebase";
 import { collection, query, orderBy, limit, onSnapshot, getDocs, startAfter, where, QueryConstraint, disableNetwork } from "firebase/firestore";
 
 export default function App() {
+  const [ageVerified, setAgeVerified] = useState<boolean>(() => {
+    return localStorage.getItem("beer_real_age_verified") === "true";
+  });
   const [activeTab, setActiveTab] = useState<"pubs" | "feed" | "stats">("feed");
   const [logs, setLogs] = useState<BeerLog[]>([]);
   const [liveBeers, setLiveBeers] = useState<BeerLog[]>([]);
@@ -94,6 +100,34 @@ export default function App() {
     return localStorage.getItem("beer_logger_username") || "";
   });
 
+  // GET /api/users strips email addresses from every entry except the requesting
+  // user's own, so the bulk listing can't be scraped for everyone's email at once.
+  const usersApiUrl = () =>
+    currentUser ? `/api/users?viewerUsername=${encodeURIComponent(currentUser)}` : "/api/users";
+
+  const [showFriendsOnboarding, setShowFriendsOnboarding] = useState(false);
+  const [showWelcomeCarousel, setShowWelcomeCarousel] = useState(false);
+
+  // Usernames the current user has blocked, so their posts/comments can be
+  // hidden client-side. A profile is the source of truth for the block list;
+  // this just derives a fast lookup set from it.
+  const blockedUsernamesLower = useMemo(() => {
+    const me = users.find((u) => u.username === currentUser);
+    return new Set((me?.blockedUsers || []).map((b) => b.toLowerCase()));
+  }, [users, currentUser]);
+
+  const applyBlockFilter = (list: BeerLog[]): BeerLog[] => {
+    if (blockedUsernamesLower.size === 0) return list;
+    return list
+      .filter((log) => !blockedUsernamesLower.has(log.user.toLowerCase()))
+      .map((log) => {
+        if (!log.comments || log.comments.length === 0) return log;
+        const hasBlockedComment = log.comments.some((c) => blockedUsernamesLower.has(c.user.toLowerCase()));
+        if (!hasBlockedComment) return log;
+        return { ...log, comments: log.comments.filter((c) => !blockedUsernamesLower.has(c.user.toLowerCase())) };
+      });
+  };
+
   // Ensure selectedPubId matches an existing pub or fallback to global
   useEffect(() => {
     if (!currentUser || pubs.length === 0) return;
@@ -106,6 +140,15 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     return localStorage.getItem("beer_logger_authenticated") === "true";
   });
+
+  // Lightweight "app was opened" heartbeat, once per session - lets the dry-streak
+  // leaderboard tell apart accounts that are still around from ones that were only
+  // ever set up once and abandoned, without requiring a fresh beer post to count.
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser) return;
+    fetch(`/api/users/${encodeURIComponent(currentUser)}/ping`, { method: "POST" }).catch(() => {});
+  }, [isAuthenticated, currentUser]);
+
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [viewingProfileUsername, setViewingProfileUsername] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -261,11 +304,27 @@ export default function App() {
 
       // 3. Save FCM token to server if a valid token or endpoint was retrieved
       if (token) {
+        // FCM can hand this device a rotated token (reload, cache clear, SW update, etc.)
+        // without the old one ever stopping - it stays valid and keeps receiving pushes
+        // unless we explicitly tell the server to drop it. Left unchecked this piles up
+        // stale-but-live tokens for the same device, so every notification arrives once
+        // per leftover token instead of once. Track our own last-registered token per
+        // device and unregister it whenever it's superseded by a new value.
+        const lastTokenKey = "beer_logger_last_fcm_token";
+        const previousToken = localStorage.getItem(lastTokenKey);
+        if (previousToken && previousToken !== token) {
+          fetch("/api/unregister-fcm-token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: previousToken })
+          }).catch(() => {});
+        }
         await fetch("/api/register-fcm-token", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token, user: currentUser })
         });
+        localStorage.setItem(lastTokenKey, token);
       }
       return token;
     } catch (err) {
@@ -450,7 +509,7 @@ export default function App() {
       const activeFirestore = forceApiFallback ? false : clientUseFirestore;
       if (activeFirestore) {
         const [usersRes, pubsRes, notifsRes] = await Promise.all([
-          fetch("/api/users"),
+          fetch(usersApiUrl()),
           fetch("/api/pubs").catch(() => null),
           fetch("/api/notifications").catch(() => null)
         ]);
@@ -502,7 +561,7 @@ export default function App() {
       } else {
         const [beersRes, usersRes, notifsRes, pubsRes] = await Promise.all([
           fetch("/api/beers?limit=10"),
-          fetch("/api/users"),
+          fetch(usersApiUrl()),
           fetch("/api/notifications").catch(() => null),
           fetch("/api/pubs").catch(() => null)
         ]);
@@ -611,7 +670,7 @@ export default function App() {
     );
 
     // Fetch users and pubs from cache-backed API endpoints
-    fetch("/api/users")
+    fetch(usersApiUrl())
       .then((res) => {
         if (!res.ok) throw new Error("Failed to fetch cached users");
         return res.json();
@@ -1233,6 +1292,32 @@ export default function App() {
     }
   };
 
+  // Self-service account deletion: unlike handleProfileDeleted (admin removing
+  // someone else), this always ends in a full logout rather than switching
+  // to another account.
+  const handleSelfAccountDeleted = async (password: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(currentUser)}?currentUser=${encodeURIComponent(currentUser)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return { success: false, error: data.error || "Failed to delete your account." };
+      }
+
+      setUsers((prevUsers) => prevUsers.filter((u) => u.username !== currentUser));
+      setLogs((prevLogs) => prevLogs.filter((log) => log.user !== currentUser));
+      handleLogout();
+      return { success: true };
+    } catch (err: any) {
+      console.error(err);
+      return { success: false, error: err.message || "Could not delete your account." };
+    }
+  };
+
   const handlePubCreated = (newPub: Pub) => {
     setPubs((prev) => [...prev, newPub]);
   };
@@ -1271,10 +1356,10 @@ export default function App() {
     }
     
     // Otherwise, handle legacy notifications or general notifications:
-    const isPostOrBenderOrImposter = n.type === "post" || n.type === "bender" || n.type === "imposter" ||
-      n.text.includes("logged a pint") || n.text.includes("BENDER ALERT") || n.text.includes("IMPOSTER PINT") ||
+    const isPostOrBenderOrImposter = n.type === "post" || n.type === "bender" || n.type === "first_pour" || n.type === "imposter" ||
+      n.text.includes("logged a pint") || n.text.includes("BENDER ALERT") || n.text.includes("first pint of the day") || n.text.includes("IMPOSTER PINT") ||
       n.text.includes("is sinking") || n.text.includes("is pouring") || n.text.includes("is enjoying") || n.text.includes("is howling");
-      
+
     if (isPostOrBenderOrImposter) {
       // General post notifications from other users
       return true;
@@ -1308,6 +1393,8 @@ export default function App() {
   const pendingInvitesCount = pubs.filter(
     (p) => (p.invited || []).map((u) => u.toLowerCase().trim()).includes(currentUser.toLowerCase().trim())
   ).length;
+
+  const pendingFriendRequestsCount = (users.find((u) => u.username === currentUser)?.friendRequests || []).length;
 
   const handleOpenNotifications = async () => {
     const opening = !showNotifsDropdown;
@@ -1357,6 +1444,17 @@ export default function App() {
     }
   };
 
+  if (!ageVerified) {
+    return (
+      <AgeGate
+        onVerified={() => {
+          localStorage.setItem("beer_real_age_verified", "true");
+          setAgeVerified(true);
+        }}
+      />
+    );
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3 font-sans">
@@ -1373,8 +1471,36 @@ export default function App() {
         onLoginSuccess={handleLoginSuccess}
         onProfileCreated={(newProfile) => {
           setUsers((prev) => [...prev, newProfile]);
+          setShowWelcomeCarousel(true);
         }}
       />
+    );
+  }
+
+  if (showWelcomeCarousel) {
+    return (
+      <WelcomeCarousel
+        onDone={() => {
+          setShowWelcomeCarousel(false);
+          setShowFriendsOnboarding(true);
+        }}
+      />
+    );
+  }
+
+  if (showFriendsOnboarding) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col justify-center py-10 px-4 sm:px-6">
+        <div className="sm:mx-auto sm:w-full sm:max-w-md">
+          <FriendsHub
+            currentUser={currentUser}
+            users={users}
+            onProfileAddedOrUpdated={handleProfileAddedOrUpdated}
+            isOnboarding
+            onClose={() => setShowFriendsOnboarding(false)}
+          />
+        </div>
+      </div>
     );
   }
 
@@ -1386,7 +1512,7 @@ export default function App() {
           <div className="p-2 bg-amber-500 text-white rounded-xl text-lg font-black shrink-0">🍻</div>
           <div className="flex-1">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-black text-amber-400 uppercase tracking-wider">BeerReal Alert</span>
+              <span className="text-xs font-black text-amber-400 uppercase tracking-wider">BeerReel Alert</span>
               <button onClick={() => setActiveToast(null)} className="text-slate-400 hover:text-white text-xs font-bold p-1">✕</button>
             </div>
             <p className="text-xs font-semibold text-slate-100 mt-1">{activeToast.text}</p>
@@ -1524,6 +1650,11 @@ export default function App() {
                               typeIcon = <Flame className="w-2.5 h-2.5" />;
                               badgeLabel = "Bender";
                               badgeStyle = "bg-red-50 text-red-600 dark:bg-red-950/40 dark:text-red-400 border-red-100 dark:border-red-900/40";
+                            } else if (notif.type === "first_pour" || notif.text.includes("first pint of the day")) {
+                              typeColorClass = "bg-amber-500 text-white shadow-amber-300/30";
+                              typeIcon = <Sparkles className="w-2.5 h-2.5" />;
+                              badgeLabel = "First Pour";
+                              badgeStyle = "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400 border-amber-100 dark:border-amber-900/40";
                             } else if (notif.type === "comment" || notif.text.includes("commented on")) {
                               typeColorClass = "bg-indigo-500 text-white shadow-indigo-300/30";
                               typeIcon = <MessageSquare className="w-2.5 h-2.5" />;
@@ -1564,6 +1695,16 @@ export default function App() {
                               typeIcon = <MessageSquare className="w-2.5 h-2.5" />;
                               badgeLabel = "Pub Chat";
                               badgeStyle = "bg-sky-50 text-sky-600 dark:bg-sky-950/40 dark:text-sky-400 border-sky-100 dark:border-sky-900/40";
+                            } else if (notif.type === "friend_request" || notif.text.includes("wants to be your friend")) {
+                              typeColorClass = "bg-violet-500 text-white shadow-violet-300/30";
+                              typeIcon = <UserPlus className="w-2.5 h-2.5" />;
+                              badgeLabel = "Friend Request";
+                              badgeStyle = "bg-violet-50 text-violet-600 dark:bg-violet-950/40 dark:text-violet-400 border-violet-100 dark:border-violet-900/40";
+                            } else if (notif.type === "friend_accept" || notif.text.includes("friend request") || notif.text.includes("now friends with you")) {
+                              typeColorClass = "bg-violet-500 text-white shadow-violet-300/30";
+                              typeIcon = <UserCheck className="w-2.5 h-2.5" />;
+                              badgeLabel = "New Friend";
+                              badgeStyle = "bg-violet-50 text-violet-600 dark:bg-violet-950/40 dark:text-violet-400 border-violet-100 dark:border-violet-900/40";
                             }
 
                              return (
@@ -1685,10 +1826,15 @@ export default function App() {
               </div>
               <button
                 onClick={() => setIsProfileOpen(true)}
-                className="transition-all focus:outline-none hover:opacity-80 active:scale-95 shrink-0"
-                title="Switch User Profile"
+                className="relative transition-all focus:outline-none hover:opacity-80 active:scale-95 shrink-0"
+                title="My Profile & Friends"
               >
                 <UserAvatar username={currentUser} users={users} className="w-8 h-8 sm:w-9 sm:h-9 text-base sm:text-lg" />
+                {pendingFriendRequestsCount > 0 && (
+                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 text-white text-[9px] font-black rounded-full flex items-center justify-center border-2 border-white dark:border-slate-900">
+                    {pendingFriendRequestsCount}
+                  </span>
+                )}
               </button>
 
               <button
@@ -1834,7 +1980,7 @@ export default function App() {
 
               {activeTab === "feed" && (
                 <ActivityFeed
-                  logs={isFilterActive ? filteredBeers : logs}
+                  logs={applyBlockFilter(isFilterActive ? filteredBeers : logs)}
                   users={users}
                   currentUser={currentUser}
                   pubs={pubs}
@@ -1899,7 +2045,10 @@ export default function App() {
         onCurrentUserChanged={handleCurrentUserChange}
         onProfileAddedOrUpdated={handleProfileAddedOrUpdated}
         onProfileDeleted={handleProfileDeleted}
+        onSelfAccountDeleted={handleSelfAccountDeleted}
         clientUseFirestore={clientUseFirestore}
+        onViewProfileRequested={(username) => setViewingProfileUsername(username)}
+        onBackToMyProfile={() => setViewingProfileUsername(null)}
       />
 
       {/* Quick Log Camera/Enrichment Workflow Overlay */}

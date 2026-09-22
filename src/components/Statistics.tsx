@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Beer,
@@ -22,8 +22,6 @@ import {
   ResponsiveContainer,
   AreaChart,
   Area,
-  BarChart,
-  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -31,10 +29,7 @@ import {
   Legend,
   PieChart,
   Pie,
-  Cell,
-  LabelList,
-  LineChart,
-  Line
+  Cell
 } from "recharts";
 import { BeerLog, UserProfile, TimeFilter, Pub } from "../types";
 import { getMostDrankBeerForUser, isImposterLog } from "../utils";
@@ -90,8 +85,26 @@ export default function Statistics({
   onViewProfileRequested,
   clientUseFirestore
 }: StatisticsProps) {
+  // Defaults to whichever window actually has check-ins (This Week -> This
+  // Month -> All Time), same idea as the Pub Hub Superlatives fix, so a
+  // quiet week doesn't just render a blank Ledger. A manual pill click locks
+  // it in place; switching pubs re-arms the auto-pick.
   const [rangeFilter, setRangeFilter] = useState<"all_time" | "this_month" | "last_week" | "this_week">("this_week");
+  const [rangeFilterLocked, setRangeFilterLocked] = useState(false);
+  const lastAutoRangePubIdRef = useRef<string | undefined>(undefined);
   const [barLayout, setBarLayout] = useState<"stacked" | "grouped">("stacked");
+
+  const selectRangeFilter = (filter: "all_time" | "this_month" | "last_week" | "this_week") => {
+    setRangeFilter(filter);
+    setRangeFilterLocked(true);
+  };
+
+  useEffect(() => {
+    if (lastAutoRangePubIdRef.current !== selectedPubId) {
+      lastAutoRangePubIdRef.current = selectedPubId;
+      setRangeFilterLocked(false);
+    }
+  }, [selectedPubId]);
 
   const [leaderboardBeers, setLeaderboardBeers] = useState<BeerLog[]>([]);
   const [pubMemberStats, setPubMemberStats] = useState<Record<string, { totalPints: number; avgRating: number; avgAbv: number }>>({});
@@ -304,6 +317,18 @@ export default function Statistics({
 
           setLeaderboardBeers(fetchedBeers);
           setPubMemberStats(statsMap);
+
+          // Auto-widen to the next timeframe if this one came up empty and
+          // the user hasn't manually picked a filter for this pub view yet.
+          // Checked against the scoped per-member stats (not the raw fetched
+          // beers, which can include other users' logs merged in from props
+          // that fall in-range but outside this pub) so this matches what
+          // the Ledger's own "No logs" empty state is actually keyed on.
+          const hasAnyPints = targetUserIds.some((id) => (statsMap[id]?.totalPints || 0) > 0);
+          if (!rangeFilterLocked && !hasAnyPints) {
+            if (rangeFilter === "this_week") setRangeFilter("this_month");
+            else if (rangeFilter === "this_month") setRangeFilter("all_time");
+          }
         }
       } catch (err) {
         console.error("Failed to fetch leaderboard beers:", err);
@@ -318,7 +343,7 @@ export default function Statistics({
     return () => {
       isMounted = false;
     };
-  }, [rangeFilter, clientUseFirestore, absoluteMinDate, selectedPubId, pubs, logs, currentUser]);
+  }, [rangeFilter, clientUseFirestore, absoluteMinDate, selectedPubId, pubs, logs, currentUser, rangeFilterLocked]);
 
   const { filteredUsers, filteredPubLogs } = useMemo(() => {
     if (!selectedPubId || selectedPubId === "global" || selectedPubId === "all") {
@@ -337,6 +362,9 @@ export default function Statistics({
 
   const [excludedUsers, setExcludedUsers] = useState<string[]>([]);
   const [isCompareDropdownOpen, setIsCompareDropdownOpen] = useState(false);
+  const LEADERBOARD_PAGE_SIZE = 5;
+  const [leaderboardVisibleCount, setLeaderboardVisibleCount] = useState(LEADERBOARD_PAGE_SIZE);
+  const [templeVisibleCount, setTempleVisibleCount] = useState(LEADERBOARD_PAGE_SIZE);
 
   // Derive selectedUsers from filteredUsers, filteredPubLogs, and excludedUsers
   const selectedUsers = useMemo(() => {
@@ -352,6 +380,50 @@ export default function Statistics({
   useEffect(() => {
     setExcludedUsers([]);
   }, [selectedPubId]);
+
+  // Reset leaderboard pagination whenever the underlying ranking could change
+  useEffect(() => {
+    setLeaderboardVisibleCount(LEADERBOARD_PAGE_SIZE);
+    setTempleVisibleCount(LEADERBOARD_PAGE_SIZE);
+  }, [selectedPubId, rangeFilter]);
+
+  // "My Body Is A Temple" - ranks by longest dry streak on record (all-time,
+  // not scoped to the date-range filter, since a streak is a running record
+  // rather than something that resets each week/month). Pulled straight from
+  // each profile's cached stats rather than recomputed from logs here.
+  //
+  // Excludes accounts that have gone quiet: without this, a friend's abandoned
+  // account just accumulates dry-streak days forever and permanently dominates
+  // the board. "Active" here means the app was opened within the last 14 days
+  // (lastActiveDate, a lightweight heartbeat pinged on load) OR they posted
+  // within 14 days OR they joined within 14 days - whichever signal is freshest.
+  // The moment someone reopens the app, the next ping puts them right back on
+  // the board - there's no separate "welcome back" step, it just self-corrects.
+  const TEMPLE_INACTIVITY_DAYS = 14;
+  const templeLeaderboardData = useMemo(() => {
+    const cutoff = Date.now() - TEMPLE_INACTIVITY_DAYS * 24 * 60 * 60 * 1000;
+
+    const lastPostByUser: Record<string, number> = {};
+    (logs || []).forEach((l) => {
+      const t = new Date(l.date).getTime();
+      if (!Number.isFinite(t)) return;
+      const key = l.user.toLowerCase();
+      if (!lastPostByUser[key] || t > lastPostByUser[key]) lastPostByUser[key] = t;
+    });
+
+    return filteredUsers
+      .filter((u) => (u.stats?.longestDryStreak || 0) > 0)
+      .filter((u) => {
+        const key = u.username.toLowerCase();
+        const lastActive = u.lastActiveDate ? new Date(u.lastActiveDate).getTime() : 0;
+        const lastPost = lastPostByUser[key] || 0;
+        const joined = u.joinedDate ? new Date(u.joinedDate).getTime() : 0;
+        const mostRecentSignal = Math.max(lastActive, lastPost, joined);
+        return mostRecentSignal >= cutoff;
+      })
+      .map((u) => ({ username: u.username, longestDryStreak: u.stats?.longestDryStreak || 0 }))
+      .sort((a, b) => b.longestDryStreak - a.longestDryStreak);
+  }, [filteredUsers, logs]);
 
   const [tableSearch, setTableSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("date");
@@ -770,6 +842,14 @@ export default function Statistics({
     });
   }, [selectedUsers, filteredLogs]);
 
+  // Cap the timeline chart to the top drinkers by volume - a line per person stops being
+  // readable well before you get anywhere near a full pub's worth of users.
+  const TIMELINE_MAX_LINES = 6;
+  const topGraphUsers = useMemo(
+    () => userComparisonData.slice(0, TIMELINE_MAX_LINES).map((u) => u.name),
+    [userComparisonData]
+  );
+
   // Chart 3 Data: Beer Name distribution - Guinness vs Other Beers
   const beerNameBreakdownData = useMemo(() => {
     if (filteredLogs.length === 0) return [];
@@ -962,7 +1042,7 @@ export default function Statistics({
               ] as const).map((filter) => (
                 <button
                   key={filter.id}
-                  onClick={() => setRangeFilter(filter.id)}
+                  onClick={() => selectRangeFilter(filter.id)}
                   className={`flex-1 text-[10px] font-bold py-1.5 px-2 rounded capitalize transition-all cursor-pointer whitespace-nowrap ${
                     rangeFilter === filter.id
                       ? "bg-white text-slate-800 shadow-sm"
@@ -1067,7 +1147,7 @@ export default function Statistics({
           <div className="py-12 text-center text-slate-400 italic">No logs within filtered period</div>
         ) : (
           <div className="space-y-3">
-            {userComparisonData.map((user, idx) => {
+            {userComparisonData.slice(0, leaderboardVisibleCount).map((user, idx) => {
               const maxPints = Math.max(...userComparisonData.map((u) => u.Pints), 1);
               const percentage = (user.Pints / maxPints) * 100;
               const userProfile = filteredUsers.find((u) => u.username === user.name);
@@ -1165,318 +1245,234 @@ export default function Statistics({
             })}
           </div>
         )}
+
+        {(userComparisonData.length > leaderboardVisibleCount || leaderboardVisibleCount > LEADERBOARD_PAGE_SIZE) && (
+          <div className="flex items-center justify-center gap-3 pt-1 flex-wrap">
+            {userComparisonData.length > leaderboardVisibleCount && (
+              <button
+                type="button"
+                onClick={() => setLeaderboardVisibleCount((c) => Math.min(c + LEADERBOARD_PAGE_SIZE, userComparisonData.length))}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-extrabold rounded-lg transition-all cursor-pointer"
+              >
+                Show {Math.min(LEADERBOARD_PAGE_SIZE, userComparisonData.length - leaderboardVisibleCount)} More
+              </button>
+            )}
+            {leaderboardVisibleCount > LEADERBOARD_PAGE_SIZE && (
+              <button
+                type="button"
+                onClick={() => setLeaderboardVisibleCount(LEADERBOARD_PAGE_SIZE)}
+                className="px-4 py-2 bg-transparent hover:bg-slate-100 text-slate-500 text-xs font-extrabold rounded-lg transition-all cursor-pointer border border-slate-200"
+              >
+                Show Less
+              </button>
+            )}
+            <span className="text-[10px] text-slate-400 font-bold">
+              {Math.min(leaderboardVisibleCount, userComparisonData.length)} of {userComparisonData.length}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* My Body Is A Temple Leaderboard - longest dry streak on record */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-4" id="temple-leaderboard-card">
+        <div className="border-b border-slate-100 pb-3.5 flex justify-between items-center">
+          <div>
+            <h3 className="text-sm font-extrabold text-slate-800 tracking-tight flex items-center gap-1.5">
+              <span className="text-base">🏛️</span>
+              My Body Is A Temple
+            </h3>
+            <p className="text-[11px] text-slate-400 mt-0.5 font-normal">Longest dry streak on record - the longest stretch between pints</p>
+          </div>
+          <span className="text-[10px] text-emerald-600 font-extrabold bg-emerald-50 border border-emerald-200/50 px-2.5 py-1 rounded-full uppercase tracking-wider">
+            All-Time Record
+          </span>
+        </div>
+
+        {templeLeaderboardData.length === 0 ? (
+          <div className="py-12 text-center text-slate-400 italic">No dry streaks on record yet</div>
+        ) : (
+          <div className="space-y-3">
+            {templeLeaderboardData.slice(0, templeVisibleCount).map((entry, idx) => {
+              const maxStreak = Math.max(...templeLeaderboardData.map((u) => u.longestDryStreak), 1);
+              const percentage = (entry.longestDryStreak / maxStreak) * 100;
+              const rank = idx + 1;
+
+              const getRankBadge = (r: number) => {
+                if (r === 1) return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-yellow-100 text-yellow-600 font-extrabold text-sm shadow-sm border border-yellow-300/80 animate-bounce-slow">🥇</span>;
+                if (r === 2) return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-slate-100 text-slate-600 font-extrabold text-sm shadow-sm border border-slate-300">🥈</span>;
+                if (r === 3) return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-amber-700/10 text-amber-800 font-extrabold text-sm shadow-sm border border-amber-700/30">🥉</span>;
+                return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-slate-50 text-slate-400 font-extrabold text-xs border border-slate-200">#{r}</span>;
+              };
+
+              const getRowStyles = (r: number) => {
+                if (r === 1) return "border-emerald-300/50 bg-gradient-to-r from-emerald-50/40 via-teal-50/15 to-transparent hover:from-emerald-50/50 hover:via-teal-50/25";
+                if (r === 2) return "border-slate-250 bg-gradient-to-r from-slate-50/40 to-transparent hover:from-slate-50/60";
+                if (r === 3) return "border-orange-200/40 bg-gradient-to-r from-orange-50/10 to-transparent hover:from-orange-50/20";
+                return "border-slate-150 bg-slate-50/10 hover:bg-slate-50";
+              };
+
+              return (
+                <div
+                  key={entry.username}
+                  className={`group flex items-center gap-4 p-3.5 border rounded-xl transition-all duration-200 hover:shadow-sm cursor-pointer ${getRowStyles(rank)}`}
+                  onClick={() => onViewProfileRequested?.(entry.username)}
+                >
+                  <div className="flex items-center gap-3 shrink-0 w-44 sm:w-52">
+                    <div className="shrink-0">{getRankBadge(rank)}</div>
+                    <UserAvatar username={entry.username} users={filteredUsers} className="w-9 h-9 text-lg" />
+                    <div className="min-w-0">
+                      <h4 className="font-extrabold text-slate-800 text-xs truncate group-hover:underline">{entry.username}</h4>
+                      <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider truncate">Record</p>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 min-w-0 flex flex-col justify-center">
+                    <div className="w-full bg-slate-200/70 h-2 rounded-full overflow-hidden relative">
+                      <div
+                        className="h-full rounded-full transition-all duration-500 ease-out bg-emerald-500"
+                        style={{ width: `${percentage}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-right min-w-[70px] shrink-0">
+                    <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Dry Streak</span>
+                    <span className="font-extrabold text-emerald-600 text-sm">
+                      {entry.longestDryStreak}d
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {(templeLeaderboardData.length > templeVisibleCount || templeVisibleCount > LEADERBOARD_PAGE_SIZE) && (
+          <div className="flex items-center justify-center gap-3 pt-1 flex-wrap">
+            {templeLeaderboardData.length > templeVisibleCount && (
+              <button
+                type="button"
+                onClick={() => setTempleVisibleCount((c) => Math.min(c + LEADERBOARD_PAGE_SIZE, templeLeaderboardData.length))}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-extrabold rounded-lg transition-all cursor-pointer"
+              >
+                Show {Math.min(LEADERBOARD_PAGE_SIZE, templeLeaderboardData.length - templeVisibleCount)} More
+              </button>
+            )}
+            {templeVisibleCount > LEADERBOARD_PAGE_SIZE && (
+              <button
+                type="button"
+                onClick={() => setTempleVisibleCount(LEADERBOARD_PAGE_SIZE)}
+                className="px-4 py-2 bg-transparent hover:bg-slate-100 text-slate-500 text-xs font-extrabold rounded-lg transition-all cursor-pointer border border-slate-200"
+              >
+                Show Less
+              </button>
+            )}
+            <span className="text-[10px] text-slate-400 font-bold">
+              {Math.min(templeVisibleCount, templeLeaderboardData.length)} of {templeLeaderboardData.length}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Graphs Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 gap-6">
         {/* Graph 1: Line Chart Timeline (A Pint in Time) */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-100 pb-3">
             <div>
               <h3 className="text-sm font-bold text-slate-800">A Pint in Time</h3>
-              <p className="text-[11px] text-slate-400 mt-0.5 font-normal">Cumulative pints logged over time</p>
+              <p className="text-[11px] text-slate-400 mt-0.5 font-normal">
+                Cumulative pints - top {Math.min(TIMELINE_MAX_LINES, topGraphUsers.length)}
+                {userComparisonData.length > TIMELINE_MAX_LINES ? ` of ${userComparisonData.length} drinkers` : " drinkers"}
+              </p>
             </div>
           </div>
 
-          {/* Compact Responsive Graph Key / Legend */}
-          {usersWithBeerOnGraph.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-slate-50/80 border border-slate-200/70 rounded-lg">
-              <span className="text-[9px] font-extrabold uppercase tracking-wider text-slate-400 mr-0.5 pl-1">Key:</span>
-              {usersWithBeerOnGraph.map((user) => {
-                const index = selectedUsers.indexOf(user);
-                const color = COLORS[index % COLORS.length];
-                const userPintsCount = filteredLogs.filter(l => l.user === user).length;
-                return (
-                  <div 
-                    key={user} 
-                    className="flex items-center gap-1.5 px-2 py-0.5 bg-white border border-slate-200/80 rounded-md text-[11px] font-medium text-slate-700 shadow-2xs"
-                  >
-                    <span 
-                      className="w-2 h-2 rounded-full shrink-0" 
-                      style={{ backgroundColor: color }}
-                    />
-                    <UserAvatar username={user} users={filteredUsers} className="w-4 h-4 text-[9px] shrink-0" />
-                    <span className="font-bold text-slate-800">{user}</span>
-                    <span className="text-[9px] font-bold text-slate-500 bg-slate-100 px-1 py-0.2 rounded">
-                      {userPintsCount}
-                    </span>
-                  </div>
-                );
-              })}
+          {/* Compact Graph Key / Legend - capped to the users actually plotted. A fixed-
+              column grid instead of flex-wrap, so it reads as an organized key instead
+              of a ragged wrap where only one or two wide name pills fit per row. */}
+          {topGraphUsers.length > 0 && (
+            <div className="p-1.5 bg-slate-50/80 border border-slate-200/70 rounded-lg space-y-1">
+              <span className="text-[9px] font-extrabold uppercase tracking-wider text-slate-400 pl-1">Key</span>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                {topGraphUsers.map((user, index) => {
+                  const color = COLORS[index % COLORS.length];
+                  const userPintsCount = filteredLogs.filter(l => l.user === user).length;
+                  return (
+                    <div
+                      key={user}
+                      className="flex items-center gap-1.5 px-2 py-1 bg-white border border-slate-200/80 rounded-md text-[11px] font-medium text-slate-700 shadow-2xs min-w-0"
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: color }}
+                      />
+                      <UserAvatar username={user} users={filteredUsers} className="w-4 h-4 text-[9px] shrink-0" />
+                      <span className="font-bold text-slate-800 truncate min-w-0 flex-1">{user}</span>
+                      <span className="text-[9px] font-bold text-slate-500 bg-slate-100 px-1 py-0.2 rounded shrink-0">
+                        {userPintsCount}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
-          
+
           <div className="h-64 text-xs font-semibold">
             {filteredLogs.length === 0 ? (
               <div className="h-full flex items-center justify-center text-slate-400 italic">No logs within filtered period</div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={timelineChartData} margin={{ top: 15, right: 15, left: -20, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={true} stroke="#e2e8f0" />
-                  <XAxis 
-                    dataKey="date" 
-                    stroke="#475569" 
-                    tickLine={{ stroke: '#475569', strokeWidth: 1.5 }}
-                    axisLine={{ stroke: '#94a3b8', strokeWidth: 1.5 }}
+                <AreaChart data={timelineChartData} margin={{ top: 15, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    {topGraphUsers.map((user, index) => (
+                      <linearGradient key={user} id={`ledgerGrad-${index}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor={COLORS[index % COLORS.length]} stopOpacity={0.35} />
+                        <stop offset="95%" stopColor={COLORS[index % COLORS.length]} stopOpacity={0} />
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="date"
+                    tickLine={false}
+                    axisLine={false}
                     tick={{ fontSize: 11, fill: '#334155', fontWeight: 700 }}
                     minTickGap={15}
                   />
-                  <YAxis 
-                    allowDecimals={false} 
-                    stroke="#475569" 
-                    tickLine={{ stroke: '#475569', strokeWidth: 1.5 }}
-                    axisLine={{ stroke: '#94a3b8', strokeWidth: 1.5 }}
+                  <YAxis
+                    allowDecimals={false}
+                    tickLine={false}
+                    axisLine={false}
                     tick={{ fontSize: 11, fill: '#334155', fontWeight: 700 }}
+                    domain={[0, 'dataMax']}
                   />
-                  <Tooltip 
+                  <Tooltip
                     formatter={(val: any, name: any) => {
                       const rounded = Math.round(Number(val));
                       return [`${rounded} ${rounded === 1 ? 'pint' : 'pints'}`, name];
                     }}
-                    contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 1px 3px 0 rgb(0 0 0 / 0.1)' }}
-                    labelStyle={{ fontWeight: 'bold', color: '#1e293b' }}
+                    contentStyle={{ backgroundColor: '#161d2f', border: '1px solid #242f49', borderRadius: '10px', boxShadow: '0 8px 20px 0 rgb(0 0 0 / 0.35)' }}
+                    labelStyle={{ fontWeight: 'bold', color: '#f1f5f9' }}
+                    itemStyle={{ fontWeight: 600 }}
                   />
-                  {usersWithBeerOnGraph.map((user) => {
-                    const index = selectedUsers.indexOf(user);
-                    return (
-                      <Line
-                        key={user}
-                        type="monotone"
-                        dataKey={user}
-                        stroke={COLORS[index % COLORS.length]}
-                        strokeWidth={2.5}
-                        dot={false}
-                        activeDot={{ r: 5 }}
-                        name={`${user}'s Pints`}
-                      />
-                    );
-                  })}
-                </LineChart>
+                  {topGraphUsers.map((user, index) => (
+                    <Area
+                      key={user}
+                      type="monotone"
+                      dataKey={user}
+                      stroke={COLORS[index % COLORS.length]}
+                      strokeWidth={2.5}
+                      fill={`url(#ledgerGrad-${index})`}
+                      dot={false}
+                      activeDot={{ r: 5, strokeWidth: 2, stroke: '#0b0f19' }}
+                      name={`${user}'s Pints`}
+                    />
+                  ))}
+                </AreaChart>
               </ResponsiveContainer>
             )}
-          </div>
-        </div>
-
-        {/* Graph 2: Classic pie breakdown of Guinness vs other beers */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <div>
-              <h3 className="text-sm font-bold text-slate-800">Was it a Guinness?</h3>
-              <p className="text-[11px] text-slate-400 mt-0.5 font-normal">Ratio of good to bad decision making</p>
-            </div>
-            {/* Elegant Guinness-inspired Golden Irish Harp SVG logo */}
-            <div className="flex items-center justify-center p-1 bg-slate-900 rounded-lg shadow-sm border border-slate-800 shrink-0">
-              <svg className="w-8 h-8 text-amber-500" viewBox="0 0 100 100" fill="currentColor">
-                <path d="M30 15 C 45 15, 65 25, 75 45 C 80 55, 75 75, 70 85 L 65 85 C 68 75, 72 58, 67 48 C 60 35, 45 28, 30 25 L 30 15 Z" />
-                <path d="M26 12 L 32 12 L 32 88 L 26 88 Z" />
-                <path d="M32 82 L 70 85 L 70 88 L 32 88 Z" />
-                <line x1="32" y1="30" x2="45" y2="34" stroke="currentColor" strokeWidth="2" opacity="0.8" />
-                <line x1="32" y1="38" x2="52" y2="43" stroke="currentColor" strokeWidth="2" opacity="0.8" />
-                <line x1="32" y1="46" x2="58" y2="52" stroke="currentColor" strokeWidth="2" opacity="0.8" />
-                <line x1="32" y1="54" x2="62" y2="61" stroke="currentColor" strokeWidth="2" opacity="0.8" />
-                <line x1="32" y1="62" x2="65" y2="70" stroke="currentColor" strokeWidth="2" opacity="0.8" />
-                <line x1="32" y1="70" x2="67" y2="78" stroke="currentColor" strokeWidth="2" opacity="0.8" />
-              </svg>
-            </div>
-          </div>
-
-          <div className="flex flex-col items-center justify-center py-2">
-            {filteredLogs.length === 0 ? (
-              <div className="w-full h-56 flex items-center justify-center text-slate-400 italic">No logs within filtered period</div>
-            ) : (() => {
-              const totalBeers = filteredLogs.length;
-              const guinnessCount = filteredLogs.filter(log => log.beerName && log.beerName.toLowerCase().includes("guinness")).length;
-              const otherCount = totalBeers - guinnessCount;
-              const guinnessPercent = totalBeers > 0 ? Math.round((guinnessCount / totalBeers) * 100) : 0;
-              const otherPercent = totalBeers > 0 ? 100 - guinnessPercent : 0;
-              
-              // Gauge logic:
-              // angle goes from 180 degrees (0% - Left) to 0 degrees (100% - Right)
-              const angleDegrees = 180 - (guinnessPercent / 100) * 180;
-              const angleRad = (angleDegrees * Math.PI) / 180;
-              const cx = 100;
-              const cy = 100;
-              const needleLen = 58;
-              const nx = cx + needleLen * Math.cos(angleRad);
-              const ny = cy - needleLen * Math.sin(angleRad);
-
-              // Zone and funny messages
-              let ratingTitle = "";
-              let ratingDesc = "";
-              let ratingColorClass = "";
-              let ratingBg = "";
-              let ratingBorder = "";
-
-              if (guinnessPercent < 25) {
-                ratingTitle = "Really Bad";
-                ratingDesc = "🚨 Muddy and flat choices! Go find a pint of the black stuff immediately.";
-                ratingColorClass = "text-rose-500 dark:text-rose-400";
-                ratingBg = "bg-rose-500/5 dark:bg-rose-500/5";
-                ratingBorder = "border-rose-500/10";
-              } else if (guinnessPercent >= 25 && guinnessPercent < 75) {
-                ratingTitle = "Adequate";
-                ratingDesc = "⚖️ Average. Tolerable balance, but your soul still yearns for more creamy foam.";
-                ratingColorClass = "text-amber-500 dark:text-amber-400";
-                ratingBg = "bg-amber-500/5 dark:bg-amber-500/5";
-                ratingBorder = "border-amber-500/10";
-              } else {
-                ratingTitle = "Creamy Goodness";
-                ratingDesc = "✨ Stout Heaven! Absolute velvet perfection in your decision making.";
-                ratingColorClass = "text-emerald-500 dark:text-emerald-400";
-                ratingBg = "bg-emerald-500/5 dark:bg-emerald-500/5";
-                ratingBorder = "border-emerald-500/10";
-              }
-              
-              return (
-                <div className="w-full flex flex-col items-center">
-                  {/* Gauge Widget */}
-                  <div className="w-full max-w-[280px] aspect-[1.8/1] relative flex items-center justify-center">
-                    <svg className="w-full h-full overflow-visible" viewBox="0 0 200 120">
-                      {/* Definitions for gorgeous gold and guinness gradients */}
-                      <defs>
-                        <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                          <stop offset="0%" stopColor="#C5A059" />
-                          <stop offset="50%" stopColor="#E2C58F" />
-                          <stop offset="100%" stopColor="#8A662D" />
-                        </linearGradient>
-                        <linearGradient id="guinnessGaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                          <stop offset="0%" stopColor="#7E7770" /> {/* Dull muddy gray-brown */}
-                          <stop offset="45%" stopColor="#4A4139" /> {/* Muddy transition */}
-                          <stop offset="75%" stopColor="#1E1B18" /> {/* Creamy Stout Black */}
-                          <stop offset="100%" stopColor="#0B0908" /> {/* Rich stout black */}
-                        </linearGradient>
-                        <linearGradient id="goldRimGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                          <stop offset="0%" stopColor="#94A3B8" /> {/* Dull gray rim at start */}
-                          <stop offset="50%" stopColor="#D97706" /> {/* Warm amber/gold */}
-                          <stop offset="100%" stopColor="#FBBF24" /> {/* Bright premium gold */}
-                        </linearGradient>
-                        <filter id="gaugeShadow" x="-10%" y="-10%" width="120%" height="120%">
-                          <feDropShadow dx="0" dy="2" stdDeviation="2" floodOpacity="0.15" />
-                        </filter>
-                      </defs>
-
-                      {/* Gauge Arcs */}
-                      {/* Background / Empty Track underlay */}
-                      <path
-                        d="M 30,100 A 70,70 0 0,1 170,100"
-                        fill="none"
-                        stroke="#f1f5f9"
-                        strokeWidth="11"
-                        strokeLinecap="round"
-                        className="dark:stroke-slate-800/40"
-                      />
-
-                      {/* Single Guinness continuous gradient track representing the story from flat to stout */}
-                      <path
-                        d="M 30,100 A 70,70 0 0,1 170,100"
-                        fill="none"
-                        stroke="url(#guinnessGaugeGrad)"
-                        strokeWidth="11"
-                        strokeLinecap="round"
-                      />
-
-                      {/* Concentric premium thin golden outer rim */}
-                      <path
-                        d="M 24,100 A 76,76 0 0,1 176,100"
-                        fill="none"
-                        stroke="url(#goldRimGrad)"
-                        strokeWidth="1.5"
-                        strokeLinecap="round"
-                        opacity="0.9"
-                      />
-
-                      {/* Concentric premium thin golden inner rim */}
-                      <path
-                        d="M 36,100 A 64,64 0 0,1 164,100"
-                        fill="none"
-                        stroke="url(#goldRimGrad)"
-                        strokeWidth="1"
-                        strokeLinecap="round"
-                        opacity="0.4"
-                      />
-
-                      {/* Center Needle & Pivot */}
-                      <g filter="url(#gaugeShadow)">
-                        {/* Needle */}
-                        <line
-                          x1={cx}
-                          y1={cy}
-                          x2={nx}
-                          y2={ny}
-                          stroke="#C5A059"
-                          strokeWidth="3.5"
-                          strokeLinecap="round"
-                        />
-                        <line
-                          x1={cx}
-                          y1={cy}
-                          x2={nx}
-                          y2={ny}
-                          stroke="#1E1B18"
-                          strokeWidth="1"
-                          strokeLinecap="round"
-                        />
-                        {/* Needle Pivot Center */}
-                        <circle cx={cx} cy={cy} r="8" fill="url(#goldGrad)" />
-                        <circle cx={cx} cy={cy} r="4" fill="#1E1B18" />
-                        <circle cx={cx} cy={cy} r="1.5" fill="#FDFBF7" />
-                      </g>
-
-                      {/* Gauge Labels & Ticks */}
-                      <text x="21" y="118" textAnchor="middle" className="text-[9px] font-extrabold fill-slate-400 dark:fill-slate-500 uppercase tracking-wider">0%</text>
-                      <text x="179" y="118" textAnchor="middle" className="text-[9px] font-extrabold fill-slate-400 dark:fill-slate-500 uppercase tracking-wider">100%</text>
-                      
-                      {/* Floating percentage readout moved higher and styled with goldGrad gradient */}
-                      <text x="100" y="15" textAnchor="middle" fill="url(#goldGrad)" className="text-[22px] font-black font-mono tracking-tight">{guinnessPercent}%</text>
-                    </svg>
-                  </div>
-
-                  {/* Playful rating review banner */}
-                  <div className={`w-full max-w-sm mt-2 p-3 rounded-xl border ${ratingBg} ${ratingBorder} text-center shadow-sm`}>
-                    <p className="text-xs font-bold text-slate-700 dark:text-slate-300 leading-relaxed font-sans">
-                      {ratingDesc}
-                    </p>
-                  </div>
-                  
-                  {/* Beautiful, High-Contrast Custom Legend/Details */}
-                  <div className="w-full mt-4 flex flex-col gap-2 max-w-sm mx-auto">
-                    {/* Creamy Pint of Guinness (Correct Choice) */}
-                    <div className="flex items-center justify-between p-3 rounded-xl bg-amber-500/5 dark:bg-amber-500/5 border border-amber-500/15 shadow-sm transition-all">
-                      <div className="flex items-center gap-3">
-                        <span className="w-4 h-4 rounded-md shrink-0 bg-[#FDFBF7] border-2 border-[#C5A059] shadow-sm flex items-center justify-center">
-                          <span className="w-1.5 h-1.5 rounded-sm bg-[#C5A059]" />
-                        </span>
-                        <div className="flex flex-col">
-                          <span className="font-extrabold text-xs text-slate-800 dark:text-slate-100 font-sans tracking-tight">Creamy Pint of Guinness</span>
-                          <span className="text-[10px] text-amber-600 dark:text-amber-500 font-bold uppercase tracking-wider">Creamy Goodness 🍻</span>
-                        </div>
-                      </div>
-                      <div className="text-right flex flex-col items-end">
-                        <span className="font-mono text-xs font-black text-slate-800 dark:text-slate-100">{guinnessCount} {guinnessCount === 1 ? "pint" : "pints"}</span>
-                        <span className="font-sans text-[10px] text-amber-600 dark:text-amber-500 font-bold">{guinnessPercent}%</span>
-                      </div>
-                    </div>
-
-                    {/* Not a Guinness (Flat & Muddy) */}
-                    <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800/80 shadow-sm transition-all opacity-85">
-                      <div className="flex items-center gap-3">
-                        <span className="w-4 h-4 rounded-md shrink-0 bg-[#7E7770] border-2 border-[#645F5A] shadow-sm flex items-center justify-center">
-                          <span className="w-1.5 h-1.5 rounded-sm bg-[#645F5A]" />
-                        </span>
-                        <div className="flex flex-col">
-                          <span className="font-extrabold text-xs text-slate-600 dark:text-slate-300 font-sans tracking-tight">Not a Guinness</span>
-                          <span className="text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-wider">Flat & Muddy 🌧️</span>
-                        </div>
-                      </div>
-                      <div className="text-right flex flex-col items-end">
-                        <span className="font-mono text-xs font-bold text-slate-500 dark:text-slate-400">{otherCount} {otherCount === 1 ? "pint" : "pints"}</span>
-                        <span className="font-sans text-[10px] text-slate-400 font-bold">{otherPercent}%</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
           </div>
         </div>
       </div>

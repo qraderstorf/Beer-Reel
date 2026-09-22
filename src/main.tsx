@@ -1,7 +1,29 @@
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
+import {Capacitor} from '@capacitor/core';
 import App from './App.tsx';
 import './index.css';
+
+// Native builds bundle the web assets locally (see capacitor.config.ts), so
+// there's no same-origin server for relative "/api/..." calls to resolve
+// against like there is on the web. Point those calls at the deployed
+// backend instead. Every fetch() in this app already targets a relative
+// "/api/..." path, so patching fetch here covers all of them without
+// touching each call site - update NATIVE_API_BASE if the backend moves.
+const NATIVE_API_BASE = 'https://beer-real-git-300733292627.us-west2.run.app';
+
+if (Capacitor.isNativePlatform()) {
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    if (typeof input === 'string' && input.startsWith('/api/')) {
+      return originalFetch(NATIVE_API_BASE + input, init);
+    }
+    if (input instanceof Request && input.url.startsWith('/api/')) {
+      return originalFetch(new Request(NATIVE_API_BASE + input.url, input), init);
+    }
+    return originalFetch(input, init);
+  };
+}
 
 // Safely attempt a single reload if a genuine chunk error occurs, with strict throttling
 function safeReloadOnce(reason: string) {

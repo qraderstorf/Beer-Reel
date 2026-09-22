@@ -1,9 +1,30 @@
 import React, { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
-import { Star, MessageSquare, Flame, Trash2, Heart, Search, Filter, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, Pin, X } from "lucide-react";
+import { Star, MessageSquare, Flame, Trash2, Heart, Search, Filter, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, Pin, X, Flag, MapPin } from "lucide-react";
 import { BeerLog, UserProfile, isSeymoreBeers, Pub } from "../types";
+import { useRetryImage } from "../utils";
 import UserAvatar from "./UserAvatar";
 import MentionDropdown from "./MentionDropdown";
+
+// Retries a few times with backoff before falling back to a text-only card - see
+// useRetryImage for why a bare <img onError> isn't enough here.
+function PostPhoto({ imageUrl, alt }: { imageUrl: string; alt: string }) {
+  const { src, failed, onError, retryKey } = useRetryImage(imageUrl);
+  if (!src || failed) return null;
+  return (
+    <div className="relative rounded-xl overflow-hidden border border-slate-200/85 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 max-h-80 w-full flex items-center justify-center shadow-sm">
+      <img
+        key={retryKey}
+        src={src}
+        alt={alt}
+        className="object-cover max-h-80 w-full hover:scale-[1.01] transition-all duration-300"
+        referrerPolicy="no-referrer"
+        onError={onError}
+      />
+    </div>
+  );
+}
 
 interface ActivityFeedProps {
   logs: BeerLog[];
@@ -131,32 +152,62 @@ function renderTextWithMentions(
   onViewProfileRequested?: (username: string) => void
 ) {
   if (!text) return null;
-  const parts = text.split(/(@[a-zA-Z0-9_-]+)/g);
-  return (
-    <>
-      {parts.map((part, index) => {
-        if (part.startsWith("@")) {
-          const username = part.substring(1);
-          const exists = users.some(
-            (u) => u.username.toLowerCase().trim() === username.toLowerCase().trim()
-          );
-          if (exists) {
-            return (
-              <span
-                key={index}
-                onClick={() => onViewProfileRequested?.(username)}
-                className="text-amber-600 dark:text-amber-400 font-bold hover:underline cursor-pointer underline decoration-amber-500/50 underline-offset-2"
-              >
-                {part}
-              </span>
-            );
-          }
-        }
-        return part;
-      })}
-    </>
-  );
+
+  // New usernames can't contain spaces, but legacy accounts (e.g. the admin
+  // "Seymore Beerz") still can - matching the longest known username first
+  // means those still link/highlight correctly instead of only "@Seymore".
+  const knownUsernames = [...new Set(users.map((u) => u.username))].sort((a, b) => b.length - a.length);
+
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+
+  while (cursor < text.length) {
+    const atIndex = text.indexOf("@", cursor);
+    if (atIndex === -1) {
+      nodes.push(text.slice(cursor));
+      break;
+    }
+    if (atIndex > cursor) {
+      nodes.push(text.slice(cursor, atIndex));
+    }
+
+    const remainder = text.slice(atIndex + 1);
+    const matchedUsername = knownUsernames.find((name) => {
+      if (!remainder.toLowerCase().startsWith(name.toLowerCase())) return false;
+      const nextChar = remainder[name.length];
+      return !nextChar || !/[a-zA-Z0-9_-]/.test(nextChar);
+    });
+
+    if (matchedUsername) {
+      nodes.push(
+        <span
+          key={key++}
+          onClick={() => onViewProfileRequested?.(matchedUsername)}
+          className="text-amber-600 dark:text-amber-400 font-bold hover:underline cursor-pointer underline decoration-amber-500/50 underline-offset-2"
+        >
+          @{matchedUsername}
+        </span>
+      );
+      cursor = atIndex + 1 + matchedUsername.length;
+    } else {
+      // Not a recognized user - render as plain text, same as before.
+      const fallback = remainder.match(/^[a-zA-Z0-9_-]*/)?.[0] || "";
+      nodes.push(`@${fallback}`);
+      cursor = atIndex + 1 + fallback.length;
+    }
+  }
+
+  return <>{nodes}</>;
 }
+
+const POST_REPORT_REASONS = [
+  "Spam",
+  "Harassment or bullying",
+  "Inappropriate or offensive content",
+  "Underage drinking concern",
+  "Other",
+];
 
 const REACTION_TYPES = [
   { key: "cheers", emoji: "🍻", label: "Cheers" },
@@ -166,45 +217,217 @@ const REACTION_TYPES = [
   { key: "dislike", emoji: "👎", label: "Imposter Pint" }
 ];
 
-const CUSTOM_EMOJIS = [
-  { emoji: "🍺", label: "Creamy" },
-  { emoji: "🍻", label: "Cheers" },
-  { emoji: "🌙", label: "Night night" },
-  { emoji: "🥂", label: "Posh" },
-  { emoji: "🍷", label: "Snooty" },
-  { emoji: "🥃", label: "Stiff" },
-  { emoji: "🍹", label: "Fruity" },
-  { emoji: "🔥", label: "Banger" },
-  { emoji: "❤️", label: "Mates" },
-  { emoji: "👍", label: "Solid" },
-  { emoji: "👎", label: "Imposter" },
-  { emoji: "😂", label: "Banter" },
-  { emoji: "🎉", label: "Session" },
-  { emoji: "🚀", label: "Sent" },
-  { emoji: "👀", label: "FOMO" },
-  { emoji: "💯", label: "Elite" },
-  { emoji: "👏", label: "Respect" },
-  { emoji: "🙌", label: "Preach" },
-  { emoji: "🤩", label: "Stellar" },
-  { emoji: "🥳", label: "Rowdy" },
-  { emoji: "😎", label: "Smooth" },
-  { emoji: "🤔", label: "Dodgy" },
-  { emoji: "😮", label: "Gasp" },
-  { emoji: "😴", label: "PassedOut" },
-  { emoji: "🍕", label: "SoberUp" },
-  { emoji: "🍔", label: "PubGrub" },
-  { emoji: "🍟", label: "Chips" },
-  { emoji: "🥨", label: "Twisted" },
-  { emoji: "🥓", label: "Crispy" },
-  { emoji: "✨", label: "Magic" },
-  { emoji: "🌟", label: "Legend" },
-  { emoji: "👑", label: "PintKing" },
-  { emoji: "🏰", label: "TheLocal" },
-  { emoji: "🍀", label: "Lucky" },
-  { emoji: "⚓", label: "Sunk" },
-  { emoji: "🏆", label: "Cheers" },
-  { emoji: "💔", label: "Spilled" }
+// Every reaction (preset or custom) renders in one of these color themes - shared
+// between the picker grid (so a cell previews the color its pill will take) and the
+// active pill on a post. Tailwind's build-time class scanner needs every class as a
+// literal substring somewhere in source, so these are spelled out in full rather than
+// built from `bg-${theme}-50`-style template strings, which it can't see and won't
+// generate.
+type ReactionTheme = "amber" | "orange" | "rose" | "fuchsia" | "sky" | "emerald" | "slate" | "indigo";
+
+const THEME_STYLES: Record<ReactionTheme, { cell: string; active: string; unselected: string }> = {
+  amber: {
+    cell: "bg-amber-50/90 dark:bg-amber-950/40 border-amber-200/80 dark:border-amber-800/80 text-amber-800 dark:text-amber-300",
+    active: "bg-amber-500 text-white border-amber-500 ring-2 ring-amber-500/20 shadow-xs",
+    unselected: "bg-amber-50/90 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200 border-amber-200/80 dark:border-amber-800/80 hover:bg-amber-100 dark:hover:bg-amber-900/50",
+  },
+  orange: {
+    cell: "bg-orange-50/90 dark:bg-orange-950/40 border-orange-200/80 dark:border-orange-800/80 text-orange-800 dark:text-orange-300",
+    active: "bg-orange-600 text-white border-orange-600 ring-2 ring-orange-500/20 shadow-xs",
+    unselected: "bg-orange-50/90 text-orange-900 dark:bg-orange-950/40 dark:text-orange-300 border-orange-200/80 dark:border-orange-800/80 hover:bg-orange-100 dark:hover:bg-orange-900/50",
+  },
+  rose: {
+    cell: "bg-rose-50/90 dark:bg-rose-950/40 border-rose-200/80 dark:border-rose-800/80 text-rose-800 dark:text-rose-300",
+    active: "bg-rose-600 text-white border-rose-600 ring-2 ring-rose-500/20 shadow-xs",
+    unselected: "bg-rose-50/90 text-rose-900 dark:bg-rose-950/40 dark:text-rose-300 border-rose-200/80 dark:border-rose-800/80 hover:bg-rose-100 dark:hover:bg-rose-900/50",
+  },
+  fuchsia: {
+    cell: "bg-fuchsia-50/90 dark:bg-fuchsia-950/40 border-fuchsia-200/80 dark:border-fuchsia-800/80 text-fuchsia-800 dark:text-fuchsia-300",
+    active: "bg-fuchsia-600 text-white border-fuchsia-600 ring-2 ring-fuchsia-500/20 shadow-xs",
+    unselected: "bg-fuchsia-50/90 text-fuchsia-900 dark:bg-fuchsia-950/40 dark:text-fuchsia-300 border-fuchsia-200/80 dark:border-fuchsia-800/80 hover:bg-fuchsia-100 dark:hover:bg-fuchsia-900/50",
+  },
+  sky: {
+    cell: "bg-sky-50/90 dark:bg-sky-950/40 border-sky-200/80 dark:border-sky-800/80 text-sky-800 dark:text-sky-300",
+    active: "bg-sky-600 text-white border-sky-600 ring-2 ring-sky-500/20 shadow-xs",
+    unselected: "bg-sky-50/90 text-sky-900 dark:bg-sky-950/40 dark:text-sky-300 border-sky-200/80 dark:border-sky-800/80 hover:bg-sky-100 dark:hover:bg-sky-900/50",
+  },
+  emerald: {
+    cell: "bg-emerald-50/90 dark:bg-emerald-950/40 border-emerald-200/80 dark:border-emerald-800/80 text-emerald-800 dark:text-emerald-300",
+    active: "bg-emerald-600 text-white border-emerald-600 ring-2 ring-emerald-500/20 shadow-xs",
+    unselected: "bg-emerald-50/90 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-200/80 dark:border-emerald-800/80 hover:bg-emerald-100 dark:hover:bg-emerald-900/50",
+  },
+  slate: {
+    cell: "bg-slate-100/90 dark:bg-slate-800/60 border-slate-200/80 dark:border-slate-700/80 text-slate-700 dark:text-slate-300",
+    active: "bg-slate-600 text-white border-slate-600 ring-2 ring-slate-500/20 shadow-xs",
+    unselected: "bg-slate-100/90 text-slate-800 dark:bg-slate-800/60 dark:text-slate-300 border-slate-200/80 dark:border-slate-700/80 hover:bg-slate-200 dark:hover:bg-slate-700/60",
+  },
+  indigo: {
+    cell: "bg-indigo-50/90 dark:bg-indigo-950/40 border-indigo-200/80 dark:border-indigo-800/80 text-indigo-800 dark:text-indigo-300",
+    active: "bg-indigo-600 text-white border-indigo-600 ring-2 ring-indigo-500/20 shadow-xs",
+    unselected: "bg-indigo-50/90 text-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300 border-indigo-200/80 dark:border-indigo-800/80 hover:bg-indigo-100 dark:hover:bg-indigo-900/50",
+  },
+};
+
+// Grouped by theme (rather than the original arbitrary order) so the picker grid reads
+// as color "neighborhoods" instead of a randomly speckled wall of emoji.
+const CUSTOM_EMOJIS: { emoji: string; label: string; theme: ReactionTheme }[] = [
+  // Not cosmetically special, but real usage data shows this as by far the most-used
+  // custom reaction on real posts (well ahead of everything else in this list) - it's
+  // pinned first so the picker doesn't bury what people already reach for most.
+  // A few reactions that are really just slang for "very drunk" ("Drunk" 🥴, "Sunk"
+  // ⚓, "Twisted" 🥨) are deliberately left out even where they have real historical
+  // usage - not a vibe worth encouraging on a platform centered around drinking.
+  // "Stiff" 🥃 stays - it describes the drink's strength, not the drinker's state,
+  // same category as "Creamy".
+  { emoji: "🍑", label: "Juicy", theme: "rose" },
+  { emoji: "🍺", label: "Creamy", theme: "amber" },
+  { emoji: "🍻", label: "Cheers", theme: "amber" },
+  { emoji: "✨", label: "Magic", theme: "amber" },
+  { emoji: "🌟", label: "Legend", theme: "amber" },
+  { emoji: "👑", label: "PintKing", theme: "amber" },
+  { emoji: "🏰", label: "TheLocal", theme: "amber" },
+  { emoji: "🏆", label: "Champ", theme: "amber" },
+  { emoji: "🥃", label: "Stiff", theme: "orange" },
+  { emoji: "🔥", label: "Banger", theme: "orange" },
+  { emoji: "👀", label: "FOMO", theme: "orange" },
+  { emoji: "❤️", label: "Mates", theme: "rose" },
+  { emoji: "👎", label: "Imposter", theme: "rose" },
+  { emoji: "💔", label: "Spilled", theme: "rose" },
+  { emoji: "🥂", label: "Posh", theme: "fuchsia" },
+  { emoji: "🍷", label: "Snooty", theme: "fuchsia" },
+  { emoji: "🎉", label: "Session", theme: "fuchsia" },
+  { emoji: "🤩", label: "Stellar", theme: "fuchsia" },
+  { emoji: "🥳", label: "Rowdy", theme: "fuchsia" },
+  { emoji: "🍹", label: "Fruity", theme: "sky" },
+  { emoji: "🚀", label: "Sent", theme: "sky" },
+  { emoji: "😎", label: "Smooth", theme: "sky" },
+  { emoji: "👍", label: "Solid", theme: "emerald" },
+  { emoji: "💯", label: "Elite", theme: "emerald" },
+  { emoji: "👏", label: "Respect", theme: "emerald" },
+  { emoji: "🙌", label: "Preach", theme: "emerald" },
+  { emoji: "🎯", label: "Nailed It", theme: "emerald" },
+  { emoji: "🍀", label: "Lucky", theme: "emerald" },
+  { emoji: "😂", label: "Banter", theme: "slate" },
+  { emoji: "🍕", label: "SoberUp", theme: "slate" },
+  { emoji: "🍔", label: "PubGrub", theme: "slate" },
+  { emoji: "🍟", label: "Chips", theme: "slate" },
+  { emoji: "🥓", label: "Crispy", theme: "slate" },
+  { emoji: "🌙", label: "Night night", theme: "indigo" },
+  { emoji: "🤔", label: "Dodgy", theme: "indigo" },
+  { emoji: "😮", label: "Gasp", theme: "indigo" },
 ];
+
+function getReactionTheme(key: string): ReactionTheme {
+  const byEmoji = CUSTOM_EMOJIS.find((e) => e.emoji === key);
+  if (byEmoji) return byEmoji.theme;
+  const byLabel = CUSTOM_EMOJIS.find((e) => e.label.toLowerCase() === key.toLowerCase());
+  return byLabel?.theme || "amber";
+}
+
+// Renders the custom-emoji grid in a fixed-position portal anchored to the "+" button's
+// live on-screen position. A portal (rather than an absolutely-positioned child of the
+// post card) is required here: post cards are wrapped in framer-motion's `motion.div`
+// with layout animations, which apply a CSS transform and would silently make any
+// `position: fixed` descendant relative to that card instead of the viewport - exactly
+// what was clipping the picker off-screen whenever it opened near the top of the feed.
+// Position is recomputed from the anchor element on every scroll/resize (rather than
+// closing on scroll) so it tracks the button instead of visually detaching from it.
+function ReactionEmojiPicker({
+  anchorEl,
+  onSelect,
+  onClose,
+}: {
+  anchorEl: HTMLElement;
+  onSelect: (emoji: string) => void;
+  onClose: () => void;
+}) {
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [style, setStyle] = useState<{ top: number; left: number } | null>(null);
+
+  useEffect(() => {
+    const margin = 8;
+    const popoverWidth = 260;
+
+    const reposition = () => {
+      if (!anchorEl.isConnected) {
+        onClose();
+        return;
+      }
+      const anchorRect = anchorEl.getBoundingClientRect();
+      const popoverHeight = popoverRef.current?.offsetHeight || 320;
+
+      const roomAbove = anchorRect.top - margin;
+      const top =
+        roomAbove >= popoverHeight
+          ? Math.max(margin, anchorRect.top - popoverHeight - margin)
+          : Math.min(anchorRect.bottom + margin, window.innerHeight - margin - popoverHeight);
+
+      let left = anchorRect.left;
+      left = Math.min(left, window.innerWidth - popoverWidth - margin);
+      left = Math.max(left, margin);
+
+      setStyle({ top, left });
+    };
+
+    reposition();
+
+    let rafId: number | null = null;
+    const onScrollOrResize = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        reposition();
+      });
+    };
+    window.addEventListener("scroll", onScrollOrResize, { capture: true, passive: true });
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [anchorEl, onClose]);
+
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-[95]" onClick={onClose} onTouchStart={onClose} />
+      <div
+        ref={popoverRef}
+        onClick={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
+        style={{
+          position: "fixed",
+          top: style?.top ?? -9999,
+          left: style?.left ?? -9999,
+          width: 260,
+          visibility: style ? "visible" : "hidden",
+        }}
+        className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 shadow-2xl z-[96] max-h-[340px] overflow-y-auto custom-scrollbar"
+      >
+        <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 pl-0.5">React with Emoji</span>
+        <div className="grid grid-cols-4 gap-1 mt-1.5">
+          {CUSTOM_EMOJIS.map((em) => {
+            const theme = THEME_STYLES[em.theme];
+            return (
+              <button
+                key={em.emoji}
+                type="button"
+                onClick={() => onSelect(em.emoji)}
+                className={`flex flex-col items-center justify-center gap-0.5 rounded-lg border py-1.5 px-0.5 transition-all active:scale-90 hover:scale-105 cursor-pointer select-none ${theme.cell}`}
+              >
+                <span className="text-lg leading-none">{em.emoji}</span>
+                <span className="text-[7.5px] font-black uppercase tracking-wide leading-none truncate max-w-full">
+                  {em.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </>,
+    document.body
+  );
+}
 
 export default function ActivityFeed({
   logs,
@@ -231,7 +454,44 @@ export default function ActivityFeed({
   hasMore
 }: ActivityFeedProps) {
   const [activeReactionTooltip, setActiveReactionTooltip] = useState<string | null>(null);
-  const [activeCustomEmojiLogId, setActiveCustomEmojiLogId] = useState<string | null>(null);
+  const [activeCustomEmojiPicker, setActiveCustomEmojiPicker] = useState<{ logId: string; el: HTMLElement } | null>(null);
+  const [activeReportLogId, setActiveReportLogId] = useState<string | null>(null);
+  const [reportReason, setReportReason] = useState("");
+  const [reportNote, setReportNote] = useState("");
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [reportSubmittedLogId, setReportSubmittedLogId] = useState<string | null>(null);
+
+  const handleSubmitPostReport = async (log: BeerLog) => {
+    if (!reportReason) return;
+    setIsSubmittingReport(true);
+    try {
+      const res = await fetch("/api/reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reporterUsername: currentUser,
+          targetType: "post",
+          targetId: log.id,
+          targetUsername: log.user,
+          reason: reportReason,
+          note: reportNote.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        setReportSubmittedLogId(log.id);
+        setTimeout(() => {
+          setActiveReportLogId(null);
+          setReportSubmittedLogId(null);
+          setReportReason("");
+          setReportNote("");
+        }, 1600);
+      }
+    } catch (err) {
+      console.error("Failed to submit report:", err);
+    } finally {
+      setIsSubmittingReport(false);
+    }
+  };
   const [localSearchTerm, setLocalSearchTerm] = useState(propSearchTerm || "");
   const searchDebounceRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -265,7 +525,7 @@ export default function ActivityFeed({
   useEffect(() => {
     const handleGlobalClick = () => {
       setActiveReactionTooltip(null);
-      setActiveCustomEmojiLogId(null);
+      setActiveCustomEmojiPicker(null);
     };
 
     document.addEventListener("click", handleGlobalClick);
@@ -601,34 +861,67 @@ export default function ActivityFeed({
     });
   };
 
-  // Helper to get the exact time string
-  const getExactTimeStr = (isoString: string) => {
+  // Helper to get the exact time string, in the POSTER's local timezone (not
+  // the viewer's) when we captured one at check-in time - e.g. "3:45 PM EST"
+  // for a friend on the east coast even if you're viewing from California.
+  // Falls back to the viewer's own local time for older logs with no stored
+  // timezone.
+  const getExactTimeStr = (isoString: string, timezone?: string) => {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return "";
-    return d.toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true
-    });
+    if (!timezone) {
+      return d.toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true
+      });
+    }
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: timezone,
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+        timeZoneName: "short"
+      }).formatToParts(d);
+      const hour = parts.find((p) => p.type === "hour")?.value || "";
+      const minute = parts.find((p) => p.type === "minute")?.value || "";
+      const dayPeriod = parts.find((p) => p.type === "dayPeriod")?.value || "";
+      const tzName = parts.find((p) => p.type === "timeZoneName")?.value || "";
+      return [`${hour}:${minute} ${dayPeriod}`, tzName].filter(Boolean).join(" ");
+    } catch (e) {
+      return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
+    }
   };
 
   // Helper to determine if a date is "after midnight" (12:00 AM to 4:59 AM)
-  const isAfterMidnight = (isoString: string) => {
+  // in the POSTER's local time, not the viewer's.
+  const isAfterMidnight = (isoString: string, timezone?: string) => {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return false;
-    const hours = d.getHours();
-    return hours >= 0 && hours < 5;
+    if (!timezone) {
+      const hours = d.getHours();
+      return hours >= 0 && hours < 5;
+    }
+    try {
+      const hourPart = new Intl.DateTimeFormat("en-US", { timeZone: timezone, hour: "numeric", hour12: false }).formatToParts(d).find((p) => p.type === "hour")?.value;
+      const hours = hourPart ? parseInt(hourPart, 10) % 24 : d.getHours();
+      return hours >= 0 && hours < 5;
+    } catch (e) {
+      const hours = d.getHours();
+      return hours >= 0 && hours < 5;
+    }
   };
 
   // Helper to format date with its exact time
-  const formatBeerDateWithTime = (isoString: string) => {
+  const formatBeerDateWithTime = (isoString: string, timezone?: string) => {
     const baseDate = formatBeerDate(isoString);
-    const timeStr = getExactTimeStr(isoString);
+    const timeStr = getExactTimeStr(isoString, timezone);
     if (!timeStr) return baseDate;
-    
+
     if (baseDate === "Just now") return `Just now (${timeStr})`;
     if (baseDate.endsWith("ago")) return `${baseDate} (${timeStr})`;
-    
+
     return `${baseDate} at ${timeStr}`;
   };
 
@@ -658,68 +951,6 @@ export default function ActivityFeed({
 
   return (
     <div className="space-y-6 max-w-2xl mx-auto" id="activity-feed-view">
-      <style>{`
-        @keyframes drunkSway {
-          0%, 100% { transform: translate(0px, 0px) rotate(0deg); filter: blur(0px); }
-          10% { transform: translate(-0.25px, 0.15px) rotate(-0.04deg); filter: blur(0.1px); }
-          20% { transform: translate(0.2px, -0.2px) rotate(0.03deg); filter: blur(0.05px); }
-          30% { transform: translate(-0.15px, -0.15px) rotate(-0.05deg); filter: blur(0.25px); }
-          40% { transform: translate(0.25px, 0.15px) rotate(0.04deg); filter: blur(0.1px); }
-          50% { transform: translate(-0.1px, -0.3px) rotate(-0.02deg); filter: blur(0.35px); }
-          60% { transform: translate(0.2px, 0.15px) rotate(0.05deg); filter: blur(0.2px); }
-          70% { transform: translate(-0.2px, -0.08px) rotate(-0.04deg); filter: blur(0.08px); }
-          80% { transform: translate(0.25px, -0.2px) rotate(0.06deg); filter: blur(0.3px); }
-          90% { transform: translate(-0.15px, 0.25px) rotate(-0.03deg); filter: blur(0.1px); }
-        }
-        @keyframes photoBlurSway {
-          0%, 100% { transform: scale(1) translate(0px, 0px) rotate(0deg); filter: blur(0px); }
-          20% { transform: scale(1.0015) translate(-0.2px, 0.15px) rotate(-0.02deg); filter: blur(0.2px); }
-          40% { transform: scale(0.999) translate(0.18px, -0.18px) rotate(0.02deg); filter: blur(0.4px); }
-          60% { transform: scale(1.001) translate(-0.12px, -0.1px) rotate(-0.01deg); filter: blur(0.15px); }
-          80% { transform: scale(1.0005) translate(0.2px, -0.12px) rotate(0.03deg); filter: blur(0.35px); }
-        }
-        @keyframes benderSirenAlert {
-          0%, 100% {
-            border-color: #ef4444;
-            box-shadow: 0 0 15px rgba(239, 68, 68, 0.45), inset 0 0 8px rgba(239, 68, 68, 0.15);
-          }
-          50% {
-            border-color: #f97316;
-            box-shadow: 0 0 25px rgba(249, 115, 22, 0.65), inset 0 0 12px rgba(249, 115, 22, 0.25);
-          }
-        }
-        @keyframes strobeLight {
-          0%, 100% { background-position: 0% 50%; }
-          50% { background-position: 100% 50%; }
-        }
-        @keyframes sirenAmbient {
-          0%, 100% {
-            background-image: radial-gradient(circle at 15% 25%, rgba(239, 68, 68, 0.28) 0%, transparent 65%),
-                              radial-gradient(circle at 85% 75%, rgba(245, 158, 11, 0.15) 0%, transparent 65%);
-          }
-          50% {
-            background-image: radial-gradient(circle at 15% 25%, rgba(245, 158, 11, 0.25) 0%, transparent 65%),
-                              radial-gradient(circle at 85% 75%, rgba(239, 68, 68, 0.15) 0%, transparent 65%);
-          }
-        }
-        .animate-drunk-sway {
-          animation: drunkSway 3.5s ease-in-out infinite;
-        }
-        .animate-bender-combined {
-          animation: drunkSway 2.8s ease-in-out infinite, benderSirenAlert 1.5s ease-in-out infinite;
-        }
-        .animate-photo-bender {
-          animation: photoBlurSway 3.6s ease-in-out infinite;
-        }
-        .animate-strobe {
-          background-size: 200% auto;
-          animation: strobeLight 0.8s linear infinite;
-        }
-        .animate-siren-ambient {
-          animation: sirenAmbient 2.0s ease-in-out infinite;
-        }
-      `}</style>
-      
       {/* Quick Log Pint CTA Banner - Sticky on scroll */}
       <div className="sticky top-[calc(3.5rem+env(safe-area-inset-top,0px))] sm:top-[calc(4rem+env(safe-area-inset-top,0px))] z-30 -mt-6 pt-2 pb-2 bg-slate-50 dark:bg-slate-950 transition-all">
         <div className="bg-gradient-to-r from-amber-500 via-amber-600 to-orange-500 rounded-xl p-2.5 sm:p-3.5 shadow-md border border-amber-600/10 flex flex-row items-center justify-between gap-2.5">
@@ -836,18 +1067,12 @@ export default function ActivityFeed({
             uniqueFilteredLogs.map((log) => {
               const hasCheered = log.cheers.includes(currentUser);
               const isDenied = getReactionList(log, "dislike").length >= 3;
-              
-              // Calculate if this user is on a bender (4+ pints logged on the same calendar day)
-              // and ensure ONLY the 4th beer and subsequent beers of that day show the bender alert
-              const checkInDateStr = log.date.split("T")[0];
-              const logsTodayForUser = logs.filter(
-                (l) => l.user === log.user && l.date.split("T")[0] === checkInDateStr
-              );
-              const sortedLogsToday = [...logsTodayForUser].sort(
-                (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-              );
-              const logIndex = sortedLogsToday.findIndex((l) => l.id === log.id);
-              const isOnBender = logsTodayForUser.length >= 4 && logIndex >= 3;
+              const isCelebrated = (log.isFirstOfDay || log.isNewStyle) && !isDenied;
+              // 3+ FOMO Alerts gets a drifting/blurring "too good to miss" treatment -
+              // a real moment people don't want to miss, worth calling out visually.
+              // Denied posts keep their own treatment regardless (that stamp already
+              // covers the whole card, so layering another effect underneath would be wasted).
+              const isFomoAlert = !isDenied && getReactionList(log, "fomo").length >= 3;
 
               return (
                 <motion.div
@@ -860,9 +1085,11 @@ export default function ActivityFeed({
                   className={`bg-white dark:bg-slate-900 rounded-xl border overflow-hidden transition-all shadow-sm relative ${
                     isDenied
                       ? "border-red-600 dark:border-red-800 shadow-[inset_0_0_20px_rgba(220,38,38,0.08)] bg-red-50/5"
-                      : isOnBender
-                        ? "border-amber-400/80 dark:border-amber-500/50 shadow-sm ring-1 ring-amber-500/20 animate-drunk-sway"
-                        : "border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700"
+                      : isFomoAlert
+                        ? "fomo-alert-card"
+                        : isCelebrated
+                          ? "border-amber-400/80 dark:border-amber-500/50 shadow-sm ring-1 ring-amber-500/20"
+                          : "border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700"
                   }`}
                 >
                   {isDenied && (
@@ -876,7 +1103,7 @@ export default function ActivityFeed({
                   )}
 
                   {/* Log Header */}
-                  <div className="p-4 flex items-center justify-between border-b border-slate-100 bg-slate-50/20">
+                  <div className="p-4 flex items-center justify-between border-b border-slate-100 dark:border-slate-800">
                     <div className="flex items-center gap-3">
                       <div 
                         className="cursor-pointer hover:opacity-80 transition-opacity"
@@ -895,29 +1122,45 @@ export default function ActivityFeed({
                           {log.rating === 5 && (
                             <Award className="w-3.5 h-3.5 text-amber-500 fill-amber-500" title="Elite rating!" />
                           )}
-                          {isOnBender && !isDenied && (
-                            <span 
+                          {log.isFirstOfDay && !isDenied && (
+                            <span
                               className="bg-amber-500/10 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 font-extrabold px-2 py-0.5 rounded-full text-[9px] uppercase tracking-wider inline-flex items-center gap-1 border border-amber-300 dark:border-amber-700/60 shadow-xs"
-                              title={`${log.user} is on a bender (4+ pints logged today)!`}
+                              title={`${log.user} poured the first pint of the day!`}
                             >
-                              🚨 Bender Alert
+                              🌅 First Pour
+                            </span>
+                          )}
+                          {log.isNewStyle && !isDenied && (
+                            <span
+                              className="bg-emerald-500/10 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 font-extrabold px-2 py-0.5 rounded-full text-[9px] uppercase tracking-wider inline-flex items-center gap-1 border border-emerald-300 dark:border-emerald-700/60 shadow-xs"
+                              title={`${log.user}'s first time logging a ${log.beerStyle}!`}
+                            >
+                              🆕 New Style
+                            </span>
+                          )}
+                          {isFomoAlert && (
+                            <span
+                              className="fomo-alert-badge text-white font-extrabold px-2 py-0.5 rounded-full text-[9px] uppercase tracking-wider inline-flex items-center gap-1 shadow-xs"
+                              title="3+ people hit FOMO Alert on this one - don't miss it!"
+                            >
+                              🚨 FOMO Alert
                             </span>
                           )}
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <p className="text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-wider">
-                            {formatBeerDateWithTime(log.date)}
+                            {formatBeerDateWithTime(log.date, log.timezone)}
                           </p>
-                          {isAfterMidnight(log.date) && (
-                            <span className="bg-violet-500/10 text-violet-600 dark:text-violet-400 font-black px-1.5 py-0.5 rounded text-[8px] uppercase tracking-widest border border-violet-500/20 animate-pulse">
-                              🌙 Gremlin Hour
+                          {isAfterMidnight(log.date, log.timezone) && (
+                            <span className="bg-violet-500/10 text-violet-600 dark:text-violet-400 font-black px-1.5 py-0.5 rounded text-[8px] uppercase tracking-widest border border-violet-500/20">
+                              👺 Goblin Mode
                             </span>
                           )}
                         </div>
                       </div>
                     </div>
                     
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 relative">
                       {log.user === currentUser && (
                         <button
                           onClick={() => onEditLogRequested?.(log)}
@@ -925,6 +1168,20 @@ export default function ActivityFeed({
                           title="Edit pint details"
                         >
                           <Edit className="w-4 h-4" />
+                        </button>
+                      )}
+                      {log.user.toLowerCase() !== currentUser.toLowerCase() && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveReportLogId(activeReportLogId === log.id ? null : log.id);
+                            setReportReason("");
+                            setReportNote("");
+                          }}
+                          className="text-slate-300 hover:text-red-500 p-2 rounded-lg hover:bg-red-50/50 transition-all focus:outline-none cursor-pointer"
+                          title="Report this post"
+                        >
+                          <Flag className="w-4 h-4" />
                         </button>
                       )}
                       {(isSeymoreBeers(currentUser) || log.user.toLowerCase() === currentUser.toLowerCase()) && (
@@ -935,6 +1192,59 @@ export default function ActivityFeed({
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
+                      )}
+
+                      {activeReportLogId === log.id && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="absolute top-full right-0 mt-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3 shadow-2xl z-40 w-[220px] space-y-2"
+                        >
+                          {reportSubmittedLogId === log.id ? (
+                            <p className="text-emerald-600 dark:text-emerald-400 text-[11px] font-bold">
+                              Report submitted. Thanks for flagging this.
+                            </p>
+                          ) : (
+                            <>
+                              <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 block">
+                                Report this post
+                              </span>
+                              <select
+                                value={reportReason}
+                                onChange={(e) => setReportReason(e.target.value)}
+                                className="w-full px-2 py-1.5 border border-slate-200 dark:border-slate-700 rounded bg-white dark:bg-slate-800 text-[11px] text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                              >
+                                <option value="">Select a reason...</option>
+                                {POST_REPORT_REASONS.map((r) => (
+                                  <option key={r} value={r}>{r}</option>
+                                ))}
+                              </select>
+                              <input
+                                type="text"
+                                placeholder="Additional details (optional)"
+                                value={reportNote}
+                                onChange={(e) => setReportNote(e.target.value)}
+                                className="w-full px-2 py-1.5 border border-slate-200 dark:border-slate-700 rounded bg-white dark:bg-slate-800 text-[11px] text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                              />
+                              <div className="flex gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={!reportReason || isSubmittingReport}
+                                  onClick={() => handleSubmitPostReport(log)}
+                                  className="px-2.5 py-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold rounded cursor-pointer transition-colors text-[10px] shrink-0"
+                                >
+                                  {isSubmittingReport ? "..." : "Submit"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setActiveReportLogId(null)}
+                                  className="px-2.5 py-1 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 font-bold rounded cursor-pointer transition-colors text-[10px] shrink-0"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -947,7 +1257,11 @@ export default function ActivityFeed({
                          log.beerName.trim().toLowerCase() !== "unnamed pint" && 
                          log.beerName.trim().toLowerCase() !== "unnamed pint 🍺" ? (
                           <>
-                            <h3 className="font-extrabold text-slate-900 dark:text-slate-100 text-base md:text-lg leading-tight">
+                            <h3 className={`font-extrabold text-base md:text-lg leading-tight ${
+                              log.rating === 5
+                                ? "bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 bg-clip-text text-transparent"
+                                : "text-slate-900 dark:text-slate-100"
+                            }`}>
                               {log.beerName}
                             </h3>
                             <div className="flex flex-wrap items-center gap-2 mt-1.5">
@@ -956,9 +1270,10 @@ export default function ActivityFeed({
                                   {log.abv.toFixed(1)}% ABV
                                 </span>
                               )}
-                              {log.hadCig && (
-                                <span className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25 px-2 py-0.5 rounded-md text-[9px] font-extrabold uppercase animate-pulse flex items-center gap-1" title="Yes, they smoked a dart with this pint. Absolute beast mode.">
-                                  🚬 Dart Combo Activated
+                              {log.location && (
+                                <span className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 px-2.5 py-0.5 rounded-md text-[10px] font-bold">
+                                  <MapPin className="w-2.5 h-2.5 shrink-0" />
+                                  {log.location}
                                 </span>
                               )}
                             </div>
@@ -970,9 +1285,10 @@ export default function ActivityFeed({
                                 {log.abv.toFixed(1)}% ABV
                               </span>
                             )}
-                            {log.hadCig && (
-                              <span className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25 px-2 py-0.5 rounded-md text-[9px] font-extrabold uppercase animate-pulse flex items-center gap-1" title="Yes, they smoked a dart with this pint. Absolute beast mode.">
-                                  🚬 Dart Combo Activated
+                            {log.location && (
+                              <span className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 px-2.5 py-0.5 rounded-md text-[10px] font-bold">
+                                <MapPin className="w-2.5 h-2.5 shrink-0" />
+                                {log.location}
                               </span>
                             )}
                           </div>
@@ -981,33 +1297,28 @@ export default function ActivityFeed({
 
                       {/* Display Stars */}
                       {log.rating > 0 ? (
-                        <div className="flex items-center gap-0.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-0.5">
-                          {[1, 2, 3, 4, 5].map((star) => (
-                            <Star
-                              key={star}
-                              className={`w-3.5 h-3.5 ${
-                                star <= log.rating
-                                  ? "fill-amber-400 text-amber-400"
-                                  : "text-slate-200"
-                              }`}
-                            />
-                          ))}
+                        <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-0.5">
+                          <div className="flex items-center gap-0.5">
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <Star
+                                key={star}
+                                className={`w-3.5 h-3.5 ${
+                                  star <= log.rating
+                                    ? "fill-amber-400 text-amber-400"
+                                    : "text-slate-200 dark:text-slate-600"
+                                }`}
+                              />
+                            ))}
+                          </div>
+                          <span className="text-[10px] font-black text-slate-500 dark:text-slate-400 leading-none pl-0.5 border-l border-slate-200 dark:border-slate-700">
+                            {log.rating}.0
+                          </span>
                         </div>
                       ) : null}
                     </div>
 
-                    {/* Logged Photo */}
                     {log.imageUrl && (
-                      <div className="relative rounded-xl overflow-hidden border border-slate-200/85 bg-slate-50 max-h-80 w-full flex items-center justify-center shadow-sm">
-                        <img
-                          src={log.imageUrl}
-                          alt={`${log.beerName} by ${log.user}`}
-                          className={`object-cover max-h-80 w-full hover:scale-[1.01] transition-all duration-300 ${
-                            isOnBender ? "animate-photo-bender" : ""
-                          }`}
-                          referrerPolicy="no-referrer"
-                        />
-                      </div>
+                      <PostPhoto imageUrl={log.imageUrl} alt={`${log.beerName} by ${log.user}`} />
                     )}
 
                     {/* Reaction Bar & Preset Buttons */}
@@ -1063,16 +1374,26 @@ export default function ActivityFeed({
 
                       return (
                         <div className="flex items-center justify-start gap-2 mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800">
-                          {/* Pre-labeled buttons & Custom emoji reactions & Plus selector */}
-                          <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                            {/* Preset Buttons */}
-                            {presets.map((react) => {
+                          {/* Pre-labeled buttons & Custom emoji reactions & Plus selector - only reactions someone has
+                              actually used get a pill, so the row stays compact instead of wrapping/scrolling. The "+"
+                              button is always visible and is the one discovery point for every reaction type, used or not. */}
+                          <div className="flex flex-wrap items-center gap-1 min-w-0">
+                            {/* Preset Buttons - hidden until at least one person has used them, except
+                                FOMO Alert and Imposter which stay visible always: otherwise nobody
+                                could ever be the first to use them since the button that starts it
+                                off would never appear. Unused, those two collapse to icon-only (no
+                                label, tighter padding) so having two permanent pills instead of one
+                                doesn't bulk out the row - they expand to a normal labeled pill the
+                                moment someone actually reacts. */}
+                            {presets.filter((react) => react.key === "fomo" || react.key === "dislike" || getReactionList(log, react.key).length > 0).map((react) => {
                               const reactorList = getReactionList(log, react.key);
                               const hasReacted = reactorList.includes(currentUser);
                               const count = reactorList.length;
+                              const isAlwaysVisible = react.key === "fomo" || react.key === "dislike";
+                              const isIdle = isAlwaysVisible && count === 0;
 
                               return (
-                                <div key={react.key} className="relative group">
+                                <div key={react.key} className="relative group shrink-0">
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -1080,16 +1401,19 @@ export default function ActivityFeed({
                                       e.stopPropagation();
                                       handleReact(log.id, react.key);
                                     }}
-                                    className={`flex items-center gap-1.5 py-1 px-2.5 rounded-full text-[10px] font-extrabold border transition-all duration-150 active:scale-95 hover:scale-105 cursor-pointer select-none ${
+                                    title={isIdle ? react.label : undefined}
+                                    className={`flex items-center gap-1 rounded-full text-[9px] font-extrabold border transition-all duration-150 active:scale-95 hover:scale-105 cursor-pointer select-none ${
+                                      isIdle ? "py-0.5 px-1.5" : "py-0.5 px-2"
+                                    } ${
                                       hasReacted
                                         ? `${react.activeClass} font-black`
-                                        : `${react.unselectedClass}`
+                                        : react.unselectedClass
                                     }`}
                                   >
-                                    <span className="text-[12px]">{react.emoji}</span>
-                                    <span className="text-[10px] font-bold">{react.label}</span>
+                                    <span className="text-[11px]">{react.emoji}</span>
+                                    {!isIdle && <span className="text-[9px] font-bold">{react.label}</span>}
                                     {count > 0 && (
-                                      <span className={`ml-0.5 px-1.5 py-0.2 rounded-full text-[9px] font-black ${
+                                      <span className={`ml-0.5 px-1 py-0.5 rounded-full text-[8px] font-black leading-none ${
                                         hasReacted ? "bg-black/25 text-white" : "bg-black/10 dark:bg-white/10 text-current"
                                       }`}>
                                         {count}
@@ -1121,8 +1445,9 @@ export default function ActivityFeed({
                             {/* Additional Custom Active Reactions */}
                             {customReactions.map(({ key, emoji, label, list }) => {
                               const hasReacted = list.includes(currentUser);
+                              const theme = THEME_STYLES[getReactionTheme(key)];
                               return (
-                                <div key={key} className="relative group">
+                                <div key={key} className="relative group shrink-0">
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -1130,16 +1455,14 @@ export default function ActivityFeed({
                                       e.stopPropagation();
                                       handleReact(log.id, key);
                                     }}
-                                    className={`flex items-center gap-1.5 py-1 px-2.5 rounded-full text-[10px] font-extrabold border transition-all duration-150 active:scale-95 hover:scale-105 cursor-pointer select-none ${
-                                      hasReacted
-                                        ? "bg-amber-500 text-white border-amber-500 ring-2 ring-amber-500/20 shadow-sm font-black"
-                                        : "bg-amber-50/90 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-800"
+                                    className={`flex items-center gap-1 py-0.5 px-2 rounded-full text-[9px] font-extrabold border transition-all duration-150 active:scale-95 hover:scale-105 cursor-pointer select-none ${
+                                      hasReacted ? `${theme.active} font-black` : theme.unselected
                                     }`}
                                   >
-                                    <span className="text-[12px]">{emoji}</span>
-                                    <span className="text-[10px] font-bold">{label}</span>
-                                    <span className={`ml-0.5 px-1.5 py-0.2 rounded-full text-[9px] font-black ${
-                                      hasReacted ? "bg-black/25 text-white" : "bg-amber-200/80 dark:bg-amber-800 text-amber-900 dark:text-amber-100"
+                                    <span className="text-[11px]">{emoji}</span>
+                                    <span className="text-[9px] font-bold">{label}</span>
+                                    <span className={`ml-0.5 px-1 py-0.5 rounded-full text-[8px] font-black leading-none ${
+                                      hasReacted ? "bg-black/25 text-white" : "bg-black/10 dark:bg-white/10 text-current"
                                     }`}>
                                       {list.length}
                                     </span>
@@ -1170,55 +1493,34 @@ export default function ActivityFeed({
                                 onClick={(e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
-                                  setActiveCustomEmojiLogId(activeCustomEmojiLogId === log.id ? null : log.id);
+                                  if (activeCustomEmojiPicker?.logId === log.id) {
+                                    setActiveCustomEmojiPicker(null);
+                                  } else {
+                                    setActiveCustomEmojiPicker({ logId: log.id, el: e.currentTarget });
+                                  }
                                 }}
                                 onTouchStart={(e) => {
                                   e.stopPropagation();
                                 }}
-                                className={`flex items-center justify-center w-6 h-6 sm:w-6.5 sm:h-6.5 rounded-full border transition-all cursor-pointer ${
-                                  activeCustomEmojiLogId === log.id
+                                className={`flex items-center justify-center w-5 h-5 rounded-full border transition-all cursor-pointer ${
+                                  activeCustomEmojiPicker?.logId === log.id
                                     ? "bg-amber-500 border-amber-500 text-white"
                                     : "border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-amber-500"
                                 }`}
                                 title="Add custom emoji reaction"
                               >
-                                <Plus className="w-3.5 h-3.5" />
+                                <Plus className="w-3 h-3" />
                               </button>
 
-                              {activeCustomEmojiLogId === log.id && (
-                                <div
-                                  onClick={(e) => e.stopPropagation()}
-                                  onTouchStart={(e) => e.stopPropagation()}
-                                  className="absolute bottom-full mb-2 left-0 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-2 shadow-2xl z-40 flex flex-col gap-1.5 w-[212px] origin-bottom transition-all duration-150"
-                                >
-                                  <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 pl-1">React with Emoji</span>
-                                  <div className="grid grid-cols-6 gap-0.5">
-                                    {CUSTOM_EMOJIS.map((em) => (
-                                      <div key={em.emoji} className="relative group/emoji flex items-center justify-center animate-fade-in">
-                                        <button
-                                          onClick={(e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            handleReact(log.id, em.emoji);
-                                            setActiveCustomEmojiLogId(null);
-                                          }}
-                                          className="w-8 h-8 text-base rounded hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-90 transition-all cursor-pointer flex items-center justify-center select-none"
-                                          title={em.label}
-                                        >
-                                          {em.emoji}
-                                        </button>
-                                        
-                                        {/* Floating tooltip on hover */}
-                                        <div className="absolute bottom-full mb-1.5 left-1/2 -translate-x-1/2 opacity-0 group-hover/emoji:opacity-100 pointer-events-none transition-all duration-100 z-50 scale-90 group-hover/emoji:scale-100 flex flex-col items-center">
-                                          <div className="bg-slate-900/95 text-white text-[9px] font-black uppercase tracking-wider py-1 px-2 rounded shadow-xl border border-slate-800 whitespace-nowrap">
-                                            {em.label}
-                                          </div>
-                                          <div className="w-1.5 h-1.5 bg-slate-900 rotate-45 -mt-[3px] border-r border-b border-slate-800"></div>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
+                              {activeCustomEmojiPicker?.logId === log.id && (
+                                <ReactionEmojiPicker
+                                  anchorEl={activeCustomEmojiPicker.el}
+                                  onClose={() => setActiveCustomEmojiPicker(null)}
+                                  onSelect={(emoji) => {
+                                    handleReact(log.id, emoji);
+                                    setActiveCustomEmojiPicker(null);
+                                  }}
+                                />
                               )}
                             </div>
                           </div>
@@ -1400,7 +1702,7 @@ export default function ActivityFeed({
 
       <AnimatePresence>
         {logToDelete && (
-          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}

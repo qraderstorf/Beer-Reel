@@ -1,19 +1,117 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
-import { BeerLog, UserProfile, AppNotification, Pub, PubChatMessage } from "./src/types";
+import { BeerLog, UserProfile, AppNotification, Pub, PubChatMessage, ContentReport, PubWidgetConfig, PubWidgetType } from "./src/types";
 import { normalizeBeerName } from "./src/data/beerCatalog";
+import { isImposterLog } from "./src/utils";
 import { initializeApp } from "firebase/app";
-import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, orderBy, where, writeBatch, limit, onSnapshot, runTransaction } from "firebase/firestore";
+import { getFirestore, collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, query, orderBy, where, writeBatch, limit, onSnapshot, runTransaction } from "firebase/firestore";
 import { getStorage, ref, uploadString, getDownloadURL } from "firebase/storage";
 import { initializeApp as initializeAdminApp, getApps as getAdminApps, applicationDefault, cert } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
+import { getStorage as getAdminStorage } from "firebase-admin/storage";
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: "15mb" }));
+
+// --- Password hashing (salted scrypt, Node's built-in crypto, no extra dependency) ---
+const PASSWORD_HASH_PREFIX = "scrypt$";
+
+function hashPassword(plain: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(plain, salt, 64).toString("hex");
+  return `${PASSWORD_HASH_PREFIX}${salt}$${hash}`;
+}
+
+function isHashedPassword(stored: string): boolean {
+  return typeof stored === "string" && stored.startsWith(PASSWORD_HASH_PREFIX);
+}
+
+// Verifies a plaintext password against a stored value. Supports legacy plaintext
+// values (direct compare) for accounts created before hashing was added - callers
+// that authenticate successfully against a legacy value should re-save the user with
+// hashPassword() so the account gets migrated to a hash on its next successful login.
+function verifyPassword(plain: string, stored: string): boolean {
+  if (!stored || typeof plain !== "string") return false;
+  if (isHashedPassword(stored)) {
+    const parts = stored.slice(PASSWORD_HASH_PREFIX.length).split("$");
+    if (parts.length !== 2) return false;
+    const [salt, hash] = parts;
+    try {
+      const hashBuf = Buffer.from(hash, "hex");
+      const candidateBuf = crypto.scryptSync(plain, salt, 64);
+      if (hashBuf.length !== candidateBuf.length) return false;
+      return crypto.timingSafeEqual(hashBuf, candidateBuf);
+    } catch {
+      return false;
+    }
+  }
+  return stored === plain;
+}
+
+// Generates a human-typeable recovery code (e.g. "7F3K-QP9X-2MNR") for self-service
+// password reset. There's no email-sending infra in this app, so this is the account
+// recovery mechanism: shown to the user exactly once (at signup, or on regeneration),
+// hashed at rest with the same scrypt helper used for passwords, never stored in plaintext.
+const RECOVERY_CODE_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // no 0/O/1/I - avoids ambiguity when handwritten/read aloud
+function generateRecoveryCode(): string {
+  const groups: string[] = [];
+  for (let g = 0; g < 3; g++) {
+    let group = "";
+    for (let i = 0; i < 4; i++) {
+      group += RECOVERY_CODE_CHARS[crypto.randomInt(RECOVERY_CODE_CHARS.length)];
+    }
+    groups.push(group);
+  }
+  return groups.join("-");
+}
+
+function normalizeRecoveryCode(code: string): string {
+  return (code || "").toString().trim().toUpperCase();
+}
+
+// Sanity bounds so a joke/typo'd value (e.g. "5000" instead of "5.0") can't submit
+// and silently skew ABV/rating averages across the whole app.
+function clampAbv(value: number): number {
+  if (!Number.isFinite(value)) return 5.0;
+  return Math.min(Math.max(value, 0), 20);
+}
+
+function clampRating(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(Math.round(value), 0), 5);
+}
+
+// Escapes user-supplied text before it's spliced into a notification's HTML string.
+// Notification text is rendered client-side via dangerouslySetInnerHTML (so the
+// <strong> tags server templates add can render) - without this, a comment, caption,
+// username, or pub name containing HTML/script would execute in the browser of
+// whoever receives the notification.
+function escapeHtml(value: any): string {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Strips the password hash before a user profile ever reaches a client response.
+// Nothing client-side needs to read this back, and a hash still enables offline
+// dictionary/brute-force attempts if leaked, so it should never leave the server.
+function stripPassword<T extends { password?: any; recoveryCodeHash?: any }>(user: T): Omit<T, "password" | "recoveryCodeHash"> {
+  const { password, recoveryCodeHash, ...rest } = user;
+  return rest;
+}
+
+function stripPasswords<T extends { password?: any; recoveryCodeHash?: any }>(users: T[]): Omit<T, "password" | "recoveryCodeHash">[] {
+  return users.map(stripPassword);
+}
 
 // Static uploads directory for images
 const uploadsDir = path.join(process.cwd(), "public", "uploads");
@@ -43,56 +141,227 @@ function getStorageInstance(): any {
   return firebaseStorage;
 }
 
-// Helper function to convert base64 data URI to a static uploaded image file (fallback)
-function saveBase64ToImageFile(base64Data: string): string {
-  if (!base64Data || typeof base64Data !== "string") return base64Data;
-  if (!base64Data.startsWith("data:image/")) {
-    return base64Data; // Already a URL or empty
-  }
-  try {
-    const matches = base64Data.match(/^data:image\/([a-zA-Z0-9-+.]+);base64,(.+)$/);
-    if (!matches || matches.length !== 3) return base64Data;
-    const ext = matches[1] === "jpeg" ? "jpg" : matches[1] || "jpg";
-    const dataBuffer = Buffer.from(matches[2], "base64");
-    const filename = `photo-${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
-    const filePath = path.join(uploadsDir, filename);
-    fs.writeFileSync(filePath, dataBuffer);
-    const publicUrl = `/uploads/${filename}`;
-    console.log(`[Upload] Converted base64 (${base64Data.length} chars) to local file ${publicUrl}`);
-    return publicUrl;
-  } catch (err) {
-    console.error("[Upload] Failed to save base64 image to disk:", err);
-    return base64Data;
-  }
-}
-
 async function saveBase64ToStorage(base64Data: string): Promise<string> {
   if (!base64Data || typeof base64Data !== "string") return base64Data;
   if (!base64Data.startsWith("data:image/")) {
     return base64Data; // Already a URL or empty
   }
-  try {
-    const matches = base64Data.match(/^data:image\/([a-zA-Z0-9-+.]+);base64,(.+)$/);
-    if (!matches || matches.length !== 3) return base64Data;
-    const ext = matches[1] === "jpeg" ? "jpg" : matches[1] || "jpg";
+  const matches = base64Data.match(/^data:image\/([a-zA-Z0-9-+.]+);base64,(.+)$/);
+  if (!matches || matches.length !== 3) return base64Data;
+  const ext = matches[1] === "jpeg" ? "jpg" : matches[1] || "jpg";
+  const filename = `photos/photo-${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
 
+  // Prefer the Admin SDK: it writes with the server's privileged service-account
+  // credentials and bypasses Firebase Storage Security Rules entirely, so uploads
+  // can't be broken by a rules change the way the unauthenticated client SDK call
+  // below can.
+  //
+  // Deliberately NOT using makePublic()/a public download URL here: that depends on
+  // the bucket's object ACL settings, which throw outright on a bucket with Uniform
+  // Bucket-Level Access (a common default) and can independently be blocked by the
+  // same kind of Security Rules change that broke the client SDK write above. Instead
+  // we serve the bytes back out ourselves via GET /api/image/:filename using these
+  // same Admin SDK credentials, so viewing a photo never depends on the bucket or an
+  // object being publicly readable at all.
+  //
+  // A couple of quick retries absorb the same class of transient credential/network
+  // hiccup (e.g. a cold Cloud Run instance) that GET /api/image/:filename also retries
+  // around, rather than treating one bad moment as a real failure.
+  if (getAdminApps().length > 0) {
+    const buffer = Buffer.from(matches[2], "base64");
+    let lastAdminErr: any = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const bucket = getAdminStorage().bucket();
+        const file = bucket.file(filename);
+        await file.save(buffer, { metadata: { contentType: `image/${matches[1]}` } });
+        const proxyUrl = `/api/image/${encodeURIComponent(filename.replace(/^photos\//, ""))}`;
+        console.log(`[Storage] Uploaded base64 (${base64Data.length} chars) via Admin SDK, serving via ${proxyUrl}`);
+        return proxyUrl;
+      } catch (adminErr) {
+        lastAdminErr = adminErr;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+    }
+    console.warn("[Storage] Admin SDK upload failed after retries, trying client SDK:", lastAdminErr);
+  }
+
+  try {
     const storage = getStorageInstance();
     if (storage) {
-      const filename = `photos/photo-${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
       const storageRef = ref(storage, filename);
       await uploadString(storageRef, base64Data, "data_url");
       const downloadUrl = await getDownloadURL(storageRef);
       console.log(`[Storage] Uploaded base64 (${base64Data.length} chars) to Firebase Storage: ${downloadUrl}`);
       return downloadUrl;
-    } else {
-      console.warn("[Storage] Firebase Storage unavailable, falling back to local file.");
-      return saveBase64ToImageFile(base64Data);
     }
   } catch (err) {
-    console.error("[Storage] Failed to upload image to Firebase Storage, falling back to local file:", err);
-    return saveBase64ToImageFile(base64Data);
+    console.error("[Storage] Failed to upload image to Firebase Storage:", err);
+  }
+
+  // Deliberately NOT falling back to local disk here anymore: Cloud Run wipes it on
+  // every redeploy/instance recycle, so a photo saved there "succeeds" immediately
+  // and then silently vanishes later with no error anyone sees - exactly the
+  // symptom this was built to stop. If durable storage genuinely isn't reachable
+  // after retries, the check-in should still save (its other details matter more
+  // than the photo), just without a photo, rather than promising one it can't keep.
+  console.error("[Storage] All upload paths failed - saving this check-in without a photo rather than risking a photo that silently disappears later.");
+  return "";
+}
+
+// Resolves an imageUrl/photoUrl value saved on a post or user profile back to the
+// object path inside the Storage bucket, or null if it isn't a Storage-backed URL at
+// all (a base64 data URL that never got uploaded, an empty value, or some other
+// external URL). Handles both the current proxy format this app writes today
+// (/api/image/<filename>, an object under photos/) and the legacy Firebase Storage
+// download-URL format (https://firebasestorage.googleapis.com/.../o/<encoded-path>?...)
+// written by the client-SDK fallback path and the old Google AI Studio app.
+function storageObjectPathForImageUrl(imageUrl: string | undefined): string | null {
+  if (!imageUrl || typeof imageUrl !== "string") return null;
+  const proxyMatch = imageUrl.match(/^\/api\/image\/([^/?]+)/);
+  if (proxyMatch) {
+    return `photos/${decodeURIComponent(proxyMatch[1])}`;
+  }
+  const legacyMatch = imageUrl.match(/firebasestorage\.googleapis\.com\/v0\/b\/[^/]+\/o\/([^?]+)/);
+  if (legacyMatch) {
+    return decodeURIComponent(legacyMatch[1]);
+  }
+  return null;
+}
+
+// Deletes the Storage object backing a post/profile photo, if any. Best-effort only -
+// a failure here (object already gone, transient credential hiccup, etc.) is logged
+// and swallowed rather than thrown, since losing a few cents of orphaned Storage is
+// far preferable to blocking someone from deleting their own post or account over it.
+async function deleteStorageObjectForImageUrl(imageUrl: string | undefined): Promise<void> {
+  const objectPath = storageObjectPathForImageUrl(imageUrl);
+  if (!objectPath) return;
+  if (getAdminApps().length === 0) return;
+  try {
+    await getAdminStorage().bucket().file(objectPath).delete({ ignoreNotFound: true });
+    console.log(`[Storage] Deleted ${objectPath}`);
+  } catch (err) {
+    console.warn(`[Storage] Failed to delete ${objectPath} (leaving it orphaned):`, err);
   }
 }
+
+// Stream an image back out of Cloud Storage using the server's own privileged Admin
+// SDK credentials, so viewing a photo never depends on the bucket/object being
+// publicly readable, on Storage Security Rules, or on signed URLs - all of which
+// have proven unreliable in this project. See saveBase64ToStorage() above.
+app.get("/api/image/:filename", async (req, res) => {
+  // Error responses are never cached - a transient hiccup here should never get
+  // "remembered" as broken by a browser or CDN sitting in front of this route.
+  const fail = (status: number) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.status(status).end();
+  };
+
+  if (getAdminApps().length === 0) {
+    fail(503);
+    return;
+  }
+
+  // Only allow simple filenames (no path traversal) under the fixed photos/ prefix.
+  const safeName = path.basename(req.params.filename);
+  const bucket = getAdminStorage().bucket();
+  const file = bucket.file(`photos/${safeName}`);
+
+  // A couple of quick retries absorbs the same class of transient credential/network
+  // hiccup (e.g. a cold Cloud Run instance) that the client itself now retries around -
+  // no reason to bounce a request back to the browser for something a 1-2s wait fixes.
+  let exists = false;
+  let metadata: any = null;
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      [exists] = await file.exists();
+      if (exists) {
+        [metadata] = await file.getMetadata();
+      }
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+
+  if (lastErr) {
+    console.error(`[Storage] Failed to serve image ${safeName} after retries:`, lastErr);
+    fail(500);
+    return;
+  }
+  if (!exists) {
+    fail(404);
+    return;
+  }
+
+  res.setHeader("Content-Type", metadata.contentType || "image/jpeg");
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  file.createReadStream()
+    .on("error", (err) => {
+      console.error(`[Storage] Failed to stream image ${safeName}:`, err);
+      if (!res.headersSent) fail(500);
+    })
+    .pipe(res);
+});
+
+// TEMPORARY diagnostic endpoint - visit this URL directly in any browser to see exactly
+// why photo uploads are failing, without needing Cloud Console log access. Safe to remove
+// once uploads are confirmed working again. Does a real tiny write+read+delete against
+// Storage via both the Admin SDK and the client SDK and reports the raw error from each.
+app.get("/api/debug-storage", async (req, res) => {
+  const report: any = {
+    adminAppsInitialized: getAdminApps().length > 0,
+    adminCredentialSource,
+    configuredStorageBucket: null,
+    adminSdk: { attempted: false, success: false, bucketName: null, error: null },
+    clientSdk: { attempted: false, success: false, error: null }
+  };
+
+  try {
+    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      report.configuredStorageBucket = config.storageBucket || null;
+    }
+  } catch (e) {}
+
+  const testFilename = `debug/storage-test-${Date.now()}.txt`;
+  const testContent = "beerreel storage diagnostic write";
+
+  if (getAdminApps().length > 0) {
+    report.adminSdk.attempted = true;
+    try {
+      const bucket = getAdminStorage().bucket();
+      report.adminSdk.bucketName = bucket.name;
+      const file = bucket.file(testFilename);
+      await file.save(Buffer.from(testContent), { metadata: { contentType: "text/plain" } });
+      const [contents] = await file.download();
+      await file.delete().catch(() => {});
+      report.adminSdk.success = contents.toString() === testContent;
+    } catch (err: any) {
+      report.adminSdk.error = { message: err?.message || String(err), code: err?.code || null };
+    }
+  }
+
+  try {
+    const storage = getStorageInstance();
+    if (storage) {
+      report.clientSdk.attempted = true;
+      const storageRef = ref(storage, testFilename);
+      await uploadString(storageRef, testContent);
+      await getDownloadURL(storageRef);
+      report.clientSdk.success = true;
+    }
+  } catch (err: any) {
+    report.clientSdk.error = { message: err?.message || String(err), code: err?.code || null };
+  }
+
+  res.setHeader("Content-Type", "application/json");
+  res.send(JSON.stringify(report, null, 2));
+});
 
 // Endpoint to upload base64 images and get back a short Storage download URL
 app.post("/api/upload-image", async (req, res) => {
@@ -110,6 +379,48 @@ app.post("/api/upload-image", async (req, res) => {
   }
 });
 
+// Turns a GPS coordinate into a rough place name for the "Use my location" button -
+// proxied through the server (rather than called from the client) so the required
+// identifying User-Agent and request pattern stay compliant with Nominatim's usage
+// policy in one place, not scattered across every client. Free, no API key, no
+// billing account - the tradeoff against a real Places lookup is a best-effort name
+// (nearest venue/business if one is tagged at that spot, otherwise neighborhood/city),
+// not a verified, precise venue picker.
+app.get("/api/reverse-geocode", async (req, res) => {
+  const lat = parseFloat((req.query.lat || "").toString());
+  const lng = parseFloat((req.query.lng || "").toString());
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    res.status(400).json({ error: "Valid lat and lng query params are required." });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=17&addressdetails=1`;
+    const response = await fetch(url, {
+      headers: { "User-Agent": "BeerReel/1.0 (beer check-in app; contact via app support)" },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      res.json({ name: null });
+      return;
+    }
+    const data: any = await response.json();
+    const addr = data.address || {};
+    // Prefer a specific venue (bar/pub/restaurant) if the coordinate lands on one,
+    // otherwise fall back to a neighborhood/city-level description.
+    const venue = addr.pub || addr.bar || addr.restaurant || addr.cafe || addr.amenity || data.name;
+    const cityLike = addr.suburb || addr.neighbourhood || addr.city || addr.town || addr.village;
+    res.json({ name: venue || cityLike || null });
+  } catch (err) {
+    console.warn("[Reverse Geocode] Failed:", err);
+    res.json({ name: null });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+});
+
 // --- FIRESTORE PERSISTENCE ---
 let db: any = null;
 let useFirestore = false;
@@ -123,7 +434,7 @@ const DEFAULT_USERS: UserProfile[] = [
     avatar: "🍻",
     bio: "Love dry-hopped double IPAs. Drinking in moderation... usually.",
     password: "Pints!",
-    email: "quin@beerreal.com"
+    email: "quin@beerreel.com"
   },
   {
     username: "Sam",
@@ -132,7 +443,7 @@ const DEFAULT_USERS: UserProfile[] = [
     avatar: "☕",
     bio: "Stout season is all year round. The darker, the better.",
     password: "Pints!",
-    email: "sam@beerreal.com"
+    email: "sam@beerreel.com"
   },
   {
     username: "Alex",
@@ -141,7 +452,7 @@ const DEFAULT_USERS: UserProfile[] = [
     avatar: "🍋",
     bio: "Sour and wild fermentation enthusiast. Can't resist a good Gose.",
     password: "Pints!",
-    email: "alex@beerreal.com"
+    email: "alex@beerreel.com"
   },
   {
     username: "Taylor",
@@ -150,7 +461,7 @@ const DEFAULT_USERS: UserProfile[] = [
     avatar: "🍺",
     bio: "Keep it crispy. Dedicated lager and craft pilsner fan.",
     password: "Pints!",
-    email: "taylor@beerreal.com"
+    email: "taylor@beerreel.com"
   },
   {
     username: "Jordan",
@@ -159,7 +470,7 @@ const DEFAULT_USERS: UserProfile[] = [
     avatar: "🍊",
     bio: "Juicy, tropical hazy IPAs are life. Citra & Mosaic hops please!",
     password: "Pints!",
-    email: "jordan@beerreal.com"
+    email: "jordan@beerreel.com"
   }
 ];
 
@@ -391,6 +702,7 @@ function getFirestoreInstance(): any {
 
 let fcmAvailable = false;
 let fcmPermissionDenied = false;
+let adminCredentialSource = "none";
 try {
   const configPath = path.join(process.cwd(), "firebase-applet-config.json");
   const serviceAccountPath = path.join(process.cwd(), "serviceAccountKey.json");
@@ -402,6 +714,7 @@ try {
     try {
       const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
       credentialToUse = cert(sa);
+      adminCredentialSource = "FIREBASE_SERVICE_ACCOUNT_KEY env var";
       console.log("[FCM Server] Using Firebase Admin Service Account credentials from environment variable.");
     } catch (e) {
       console.warn("[FCM Server] Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY env var:", e);
@@ -412,6 +725,7 @@ try {
     try {
       const sa = JSON.parse(fs.readFileSync(serviceAccountPath, "utf8"));
       credentialToUse = cert(sa);
+      adminCredentialSource = "serviceAccountKey.json";
       console.log("[FCM Server] Using Firebase Admin Service Account credentials from serviceAccountKey.json");
     } catch (e) {
       console.warn("[FCM Server] Failed to read serviceAccountKey.json:", e);
@@ -422,6 +736,7 @@ try {
     try {
       const sa = JSON.parse(fs.readFileSync(altServiceAccountPath, "utf8"));
       credentialToUse = cert(sa);
+      adminCredentialSource = "service-account.json";
       console.log("[FCM Server] Using Firebase Admin Service Account credentials from service-account.json");
     } catch (e) {
       console.warn("[FCM Server] Failed to read service-account.json:", e);
@@ -430,6 +745,7 @@ try {
 
   if (!credentialToUse) {
     credentialToUse = applicationDefault();
+    adminCredentialSource = "Application Default Credentials (ADC)";
     console.log("[FCM Server] Using Application Default Credentials (ADC).");
   }
 
@@ -437,6 +753,7 @@ try {
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
     initializeAdminApp({
       projectId: config.projectId,
+      storageBucket: config.storageBucket,
       credential: credentialToUse
     });
     fcmAvailable = true;
@@ -570,21 +887,21 @@ async function sendFCMNotification(targetUser: string | null, title: string, bod
     for (const token of tokens) {
       const message = {
         token: token,
+        // Data-only payload (no top-level/webpush "notification" block): the FCM Web SDK
+        // auto-displays a notification whenever a message carries a "notification" payload,
+        // and our service worker's onBackgroundMessage handler ALSO calls showNotification()
+        // for every background message - together those caused every push to render twice.
+        // Keeping this data-only means only our own SW handler shows it, exactly once.
         data: {
           click_action: "/",
+          title: title,
+          body: body,
           ...payload
         },
         webpush: {
           headers: {
             Urgency: "high",
             TTL: "86400"
-          },
-          notification: {
-            title: title,
-            body: body,
-            icon: "/icon-192.png",
-            badge: "/icon-192.png",
-            tag: payload.notificationId || payload.id || "beerreal-notif"
           },
           fcm_options: {
             link: "/"
@@ -667,18 +984,13 @@ async function sendFcmPushForNotification(notif: AppNotification) {
         for (const token of recipientTokens) {
           const message = {
             token: token,
-            data: { click_action: "/", notificationId: notif.id, type: notif.type },
+            // Data-only payload - see comment in sendFCMNotification() above for why we don't
+            // also set a webpush "notification" block (it caused every push to show twice).
+            data: { click_action: "/", notificationId: notif.id, type: notif.type || "", title, body },
             webpush: {
               headers: {
                 Urgency: "high",
                 TTL: "86400"
-              },
-              notification: {
-                title,
-                body,
-                icon: "/icon.svg",
-                badge: "/icon.svg",
-                tag: notif.id
               },
               fcm_options: {
                 link: "/"
@@ -729,9 +1041,15 @@ function sanitizeForFirestore<T extends Record<string, any>>(obj: T): Record<str
         clean[key] = sanitizeForFirestore(value);
       } else if (typeof value === "string") {
         let strVal = value;
-        // Auto-convert any base64 image field to a saved file URL if it slipped through
+        // Raw base64 shouldn't reach this point - it should already have gone through
+        // saveBase64ToStorage() upstream. If it somehow slipped through anyway, strip it
+        // rather than falling back to a synchronous local-disk write here: this function
+        // isn't async so it can't retry through the real Admin SDK upload path, and a
+        // "successful" local write is Cloud Run-ephemeral - it would look fine immediately
+        // and silently vanish later, which is worse than just not having a photo.
         if ((key === "imageUrl" || key === "avatar") && strVal.startsWith("data:image/")) {
-          strVal = saveBase64ToImageFile(strVal);
+          console.warn(`[Firestore Safeguard] Raw base64 reached sanitizeForFirestore for "${key}" - this should have been uploaded already. Stripping instead of writing to ephemeral local disk.`);
+          strVal = "";
         }
         // Enforce 50KB size safeguard
         if (strVal.length > MAX_FIELD_BYTES) {
@@ -798,14 +1116,30 @@ async function getAllUsers(): Promise<UserProfile[]> {
     list = DEFAULT_USERS;
   }
 
-  // Auto-set password to 'Pints!' for any user missing it
+  // Auto-set password to 'Pints!' for any user missing it, and grandfather
+  // any pre-existing user (one with no `friends` field yet) into mutual
+  // friendship with every other pre-existing user. Users created after this
+  // migration ran get an explicit empty `friends` array at signup, so they're
+  // never swept into this backfill - they have to add friends themselves.
+  const legacyUsernames = list.filter((u) => u.friends === undefined).map((u) => u.username);
+
   let updatedUsersCount = 0;
   const migratedUsers = list.map((u) => {
-    if (!u.password) {
-      updatedUsersCount++;
-      return { ...u, password: "Pints!" };
+    let next = u;
+    let changed = false;
+    if (!next.password) {
+      next = { ...next, password: "Pints!" };
+      changed = true;
     }
-    return u;
+    if (next.friends === undefined) {
+      next = {
+        ...next,
+        friends: legacyUsernames.filter((name) => name.toLowerCase() !== u.username.toLowerCase()),
+      };
+      changed = true;
+    }
+    if (changed) updatedUsersCount++;
+    return next;
   });
 
   if (updatedUsersCount > 0 && firestore && useFirestore) {
@@ -815,9 +1149,9 @@ async function getAllUsers(): Promise<UserProfile[]> {
         batch.set(doc(firestore, "users", u.username.toLowerCase()), sanitizeForFirestore(u));
       }
       await batch.commit();
-      console.log(`[Migration] Firestore updated with default user passwords.`);
+      console.log(`[Migration] Firestore updated with default passwords and grandfathered friends.`);
     } catch (err) {
-      console.error("[Migration] Failed to batch-update Firestore with default user passwords:", err);
+      console.error("[Migration] Failed to batch-update Firestore with user migration:", err);
     }
   }
 
@@ -868,13 +1202,50 @@ function getDayDifference(dateStr1: string, dateStr2: string): number {
   return Math.round(diffTime / (1000 * 60 * 60 * 24));
 }
 
+function isValidTimeZone(timeZone: any): timeZone is string {
+  if (!timeZone || typeof timeZone !== "string") return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function getLocalHour(dateInput: Date | string | number, timeZone: string): number {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', hour12: false });
+    const hourPart = formatter.formatToParts(new Date(dateInput)).find(p => p.type === 'hour')?.value;
+    const hour = hourPart ? parseInt(hourPart, 10) : new Date(dateInput).getHours();
+    return hour === 24 ? 0 : hour;
+  } catch (e) {
+    return new Date(dateInput).getHours();
+  }
+}
+
+// "Golden Hour" time-of-day buckets - a fun personality label instead of a raw
+// activity count. Ranges are in a 5am-29am (i.e. wraps past midnight) scale so
+// the graveyard-shift hours (11pm-5am) group into one "Night Owl" bucket.
+const GOLDEN_HOUR_BUCKETS: { start: number; end: number; label: string; emoji: string }[] = [
+  { start: 5, end: 11, label: "Early Bird", emoji: "🌅" },
+  { start: 11, end: 14, label: "Lunch Breaker", emoji: "🥪" },
+  { start: 14, end: 17, label: "Afternoon Sipper", emoji: "☀️" },
+  { start: 17, end: 20, label: "Happy Hour", emoji: "🍻" },
+  { start: 20, end: 23, label: "Evening Regular", emoji: "🌆" },
+  { start: 23, end: 29, label: "Night Owl", emoji: "🦉" },
+];
+
+function getGoldenHourBucket(hour: number): { label: string; emoji: string } {
+  const normalizedHour = hour < 5 ? hour + 24 : hour;
+  const bucket = GOLDEN_HOUR_BUCKETS.find((b) => normalizedHour >= b.start && normalizedHour < b.end);
+  return bucket || GOLDEN_HOUR_BUCKETS[GOLDEN_HOUR_BUCKETS.length - 1];
+}
+
 // Recalculate and cache stats for a user
 async function recalculateAndCacheUserStats(username: string): Promise<any> {
   const allBeersList = await getAllBeers();
   const userLogs = allBeersList.filter(
-    (l) => l.user.toLowerCase() === username.toLowerCase() &&
-      (!l.reactions?.dislike || l.reactions.dislike.length < 3) &&
-      (!l.reactions?.imposter || l.reactions.imposter.length < 3)
+    (l) => l.user.toLowerCase() === username.toLowerCase() && !isImposterLog(l)
   );
 
   const totalPints = userLogs.length;
@@ -904,64 +1275,72 @@ async function recalculateAndCacheUserStats(username: string): Promise<any> {
   const existingUser = allUsersList.find(
     (u) => u.username.toLowerCase() === username.toLowerCase()
   );
-  const timeZone = (existingUser && (existingUser as any).timezone) || "America/Los_Angeles";
 
-  const benderDays: Record<string, number> = {};
+  // Each check-in carries the poster's own timezone (captured client-side at
+  // log time), so date/hour bucketing below uses that per-log zone rather
+  // than a single blanket one - correct even for someone who travels. Falls
+  // back to a fixed default only for logs from before this was tracked.
+  const DEFAULT_TIMEZONE = "America/Los_Angeles";
+  const zoneFor = (l: BeerLog) => l.timezone || DEFAULT_TIMEZONE;
+  const mostRecentLog = [...userLogs].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+  const currentZone = mostRecentLog ? zoneFor(mostRecentLog) : DEFAULT_TIMEZONE;
+
+  // "The Usual" - your single most-repeated beer, a little personality fact
+  // rather than a raw activity count.
+  const beerNameCounts: Record<string, number> = {};
   userLogs.forEach((l) => {
-    const day = getLocalDateString(l.date, timeZone);
-    benderDays[day] = (benderDays[day] || 0) + 1;
+    const name = (l.beerName || "").trim();
+    if (!name) return;
+    beerNameCounts[name] = (beerNameCounts[name] || 0) + 1;
   });
-  const benderCount = Object.values(benderDays).filter((count) => count >= 4).length;
+  let theUsualBeerName = "";
+  let theUsualCount = 0;
+  Object.entries(beerNameCounts).forEach(([name, count]) => {
+    if (count > theUsualCount) {
+      theUsualBeerName = name;
+      theUsualCount = count;
+    }
+  });
 
-  // Streak calculations
-  const loggedLocalDates = userLogs.map((l) => getLocalDateString(l.date, timeZone));
+  // "Golden Hour" - the time-of-day bucket they check in during most often.
+  const goldenHourCounts: Record<string, number> = {};
+  userLogs.forEach((l) => {
+    const bucket = getGoldenHourBucket(getLocalHour(l.date, zoneFor(l)));
+    goldenHourCounts[bucket.label] = (goldenHourCounts[bucket.label] || 0) + 1;
+  });
+  let goldenHourLabel = "TBD";
+  let goldenHourEmoji = "🕐";
+  let maxGoldenHourCount = 0;
+  Object.entries(goldenHourCounts).forEach(([label, count]) => {
+    if (count > maxGoldenHourCount) {
+      maxGoldenHourCount = count;
+      goldenHourLabel = label;
+      goldenHourEmoji = GOLDEN_HOUR_BUCKETS.find((b) => b.label === label)?.emoji || "🕐";
+    }
+  });
+
+  const firstPourCount = userLogs.filter((l) => l.isFirstOfDay).length;
+
+  // Dry-streak calculations only - no "drinking streak" is tracked or surfaced,
+  // since rewarding consecutive days of drinking is exactly the kind of pattern
+  // that encourages excessive/habitual alcohol use.
+  const loggedLocalDates = userLogs.map((l) => getLocalDateString(l.date, zoneFor(l)));
   const uniqueDates = Array.from(new Set(loggedLocalDates)).sort();
 
-  let longestDrinkingStreak = 0;
   let longestDryStreak = 0;
-  let currentDrinkingStreak = 0;
   let currentDryStreak = 0;
 
   if (uniqueDates.length > 0) {
-    // 1. Longest Drinking Streak
-    let tempDrinkingStreak = 1;
-    for (let i = 1; i < uniqueDates.length; i++) {
-      const diff = getDayDifference(uniqueDates[i - 1], uniqueDates[i]);
-      if (diff === 1) {
-        tempDrinkingStreak++;
-      } else if (diff > 1) {
-        if (tempDrinkingStreak > longestDrinkingStreak) {
-          longestDrinkingStreak = tempDrinkingStreak;
-        }
-        tempDrinkingStreak = 1;
-      }
-    }
-    if (tempDrinkingStreak > longestDrinkingStreak) {
-      longestDrinkingStreak = tempDrinkingStreak;
-    }
-
-    // 2. Today Status
-    const todayStr = getLocalDateString(new Date(), timeZone);
+    // 1. Today Status - "today" is judged from the zone of their most recent
+    // check-in, our best guess at where they currently are.
+    const todayStr = getLocalDateString(new Date(), currentZone);
     const hasLogToday = uniqueDates.includes(todayStr);
 
-    // 3. Current Drinking / Dry Streak (Mutually Exclusive)
-    if (hasLogToday) {
-      currentDryStreak = 0;
+    // 2. Current Dry Streak (0 if they've already logged today)
+    if (!hasLogToday) {
       let checkDate = new Date(todayStr + "T12:00:00");
       while (true) {
-        const checkDateStr = getLocalDateString(checkDate, timeZone);
-        if (uniqueDates.includes(checkDateStr)) {
-          currentDrinkingStreak++;
-          checkDate.setDate(checkDate.getDate() - 1);
-        } else {
-          break;
-        }
-      }
-    } else {
-      currentDrinkingStreak = 0;
-      let checkDate = new Date(todayStr + "T12:00:00");
-      while (true) {
-        const checkDateStr = getLocalDateString(checkDate, timeZone);
+        const checkDateStr = getLocalDateString(checkDate, currentZone);
         if (!uniqueDates.includes(checkDateStr)) {
           currentDryStreak++;
           checkDate.setDate(checkDate.getDate() - 1);
@@ -971,7 +1350,7 @@ async function recalculateAndCacheUserStats(username: string): Promise<any> {
       }
     }
 
-    // 4. Longest Dry Streak
+    // 3. Longest Dry Streak
     if (uniqueDates.length > 1) {
       for (let i = 1; i < uniqueDates.length; i++) {
         const diff = getDayDifference(uniqueDates[i - 1], uniqueDates[i]);
@@ -991,19 +1370,30 @@ async function recalculateAndCacheUserStats(username: string): Promise<any> {
     avgRating,
     favoriteStyle,
     totalCheers,
-    benderCount,
-    longestDrinkingStreak,
+    theUsualBeerName,
+    theUsualCount,
+    goldenHourLabel,
+    goldenHourEmoji,
+    firstPourCount,
     longestDryStreak,
-    currentDrinkingStreak,
     currentDryStreak
   };
 
   if (existingUser) {
-    const updatedProfile = {
-      ...existingUser,
-      stats: calculatedStats
-    };
-    await saveUser(updatedProfile);
+    // Deliberately updateDoc, not saveUser()/setDoc: this function is often kicked
+    // off as fire-and-forget background work (e.g. after a beer log delete) and can
+    // still be running after the user account itself gets deleted moments later
+    // (their last log deleted, then the account deleted right after). setDoc would
+    // silently resurrect the just-deleted account with a fresh, zeroed-out profile;
+    // updateDoc correctly no-ops (throws, caught below) if the document is gone.
+    const firestore = getFirestoreInstance();
+    if (firestore && useFirestore) {
+      try {
+        await updateDoc(doc(firestore, "users", username.toLowerCase()), { stats: calculatedStats });
+      } catch (err) {
+        console.log(`[Stats] Skipped stats update for ${username} - account no longer exists.`);
+      }
+    }
   }
 
   return calculatedStats;
@@ -1015,6 +1405,34 @@ async function deleteUser(username: string): Promise<boolean> {
   const firestore = getFirestoreInstance();
   if (firestore && useFirestore) {
     try {
+      // Strip the departing user from everyone else's friends/friendRequests/
+      // blockedUsers lists first, so no other profile is left pointing at a
+      // deleted account.
+      const allUsers = await getAllUsers();
+      const departingUser = allUsers.find((u) => u.username.toLowerCase() === usernameKey);
+      // Without this check, deleting a username that doesn't actually match any
+      // stored account (wrong case, a stale reference, a client-side truncated
+      // value - e.g. the signup form's username input is capped at 15 characters,
+      // so a caller passing a longer string here silently targets a document that
+      // was never created) would still report success: deleteDoc() doesn't error
+      // on a missing document, so every step below would appear to "work" while
+      // touching nothing.
+      if (!departingUser) {
+        return false;
+      }
+      for (const other of allUsers) {
+        if (other.username.toLowerCase() === usernameKey) continue;
+        const hadFriend = (other.friends || []).some((f) => f.toLowerCase() === usernameKey);
+        const hadRequest = (other.friendRequests || []).some((f) => f.toLowerCase() === usernameKey);
+        const hadBlock = (other.blockedUsers || []).some((f) => f.toLowerCase() === usernameKey);
+        if (hadFriend || hadRequest || hadBlock) {
+          other.friends = (other.friends || []).filter((f) => f.toLowerCase() !== usernameKey);
+          other.friendRequests = (other.friendRequests || []).filter((f) => f.toLowerCase() !== usernameKey);
+          other.blockedUsers = (other.blockedUsers || []).filter((f) => f.toLowerCase() !== usernameKey);
+          await saveUser(other);
+        }
+      }
+
       // Delete user
       await deleteDoc(doc(firestore, "users", usernameKey));
 
@@ -1023,10 +1441,23 @@ async function deleteUser(username: string): Promise<boolean> {
       const q = query(beersColl, where("user", "==", username));
       const snap = await getDocs(q);
       const batch = writeBatch(firestore);
+      const orphanedImageUrls: string[] = [];
       snap.forEach((docSnap) => {
         batch.delete(docSnap.ref);
+        const beerData = docSnap.data() as BeerLog;
+        if (beerData.imageUrl) orphanedImageUrls.push(beerData.imageUrl);
       });
       await batch.commit();
+
+      // Best-effort Storage cleanup for the profile photo and every deleted post's
+      // photo - fired after the Firestore deletes succeed, never blocking or failing
+      // the account deletion itself if a Storage object is already gone or briefly
+      // unreachable.
+      if (departingUser?.photoUrl) orphanedImageUrls.push(departingUser.photoUrl);
+      Promise.all(orphanedImageUrls.map((url) => deleteStorageObjectForImageUrl(url))).catch((e) =>
+        console.warn("Error cleaning up Storage objects after user delete:", e)
+      );
+
       return true;
     } catch (err) {
       handleFirestoreError(err, "delete user");
@@ -1046,8 +1477,14 @@ async function getAllBeers(): Promise<BeerLog[]> {
   
   if (firestore && useFirestore) {
     try {
+      // This is the single source of truth every other beer-related feature
+      // reads from (the feed, per-user stats, leaderboards, Pub Awards...),
+      // so capping it silently truncates "all time" everywhere at once once
+      // the community logs more pints than the limit - not just the visible
+      // feed. 5000 gives a lot of headroom over today's real count (~250)
+      // while still bounding the read/sort cost of every request.
       const beersColl = collection(firestore, "beers");
-      const q = query(beersColl, orderBy("date", "desc"), limit(200));
+      const q = query(beersColl, orderBy("date", "desc"), limit(5000));
       const snap = await getDocs(q);
       snap.forEach((docSnap) => {
         list.push(docSnap.data() as BeerLog);
@@ -1157,9 +1594,8 @@ function isGuinnessBeerName(name: string | undefined | null): boolean {
   return name.trim().toLowerCase().includes("guinness");
 }
 
-function generateCreativeBeerNotificationText(beerName: string, abv: number, dateStr: string, hadCig: boolean, todayCount: number): string {
+function generateCreativeBeerNotificationText(beerName: string, abv: number, dateStr: string, todayCount: number): string {
   const isGuinness = isGuinnessBeerName(beerName);
-  const cigSfx = hadCig ? " 🚬" : "";
 
   // Get hour from ISO date string
   let hour = 17; // default
@@ -1173,10 +1609,10 @@ function generateCreativeBeerNotificationText(beerName: string, abv: number, dat
   // SPECIAL GUINNESS NOTIFICATION
   if (isGuinness) {
     const guinnessOptions = [
-      `is pouring a majestic black pint of Guinness! 🖤🇮🇪🍺 Sláinte!${cigSfx}`,
-      `is settling a smooth, creamy pint of Guinness! 🇮🇪🍺 Good things come to those who wait!${cigSfx}`,
-      `just poured the dark stuff: a lovely pint of Guinness! 🖤🍻 Sláinte!${cigSfx}`,
-      `is enjoying a perfectly settled velvet pint of Guinness! 🖤🍺 Sláinte!${cigSfx}`
+      `is pouring a majestic black pint of Guinness! 🖤🇮🇪🍺 Sláinte!`,
+      `is settling a smooth, creamy pint of Guinness! 🇮🇪🍺 Good things come to those who wait!`,
+      `just poured the dark stuff: a lovely pint of Guinness! 🖤🍻 Sláinte!`,
+      `is enjoying a perfectly settled velvet pint of Guinness! 🖤🍺 Sláinte!`
     ];
     return guinnessOptions[Math.floor(Math.random() * guinnessOptions.length)];
   }
@@ -1184,10 +1620,10 @@ function generateCreativeBeerNotificationText(beerName: string, abv: number, dat
   // 1st of the day!
   if (todayCount === 1) {
     const options = [
-      `is kickstarting their day with a cold <strong>1st pint</strong>! 🌅🍺${cigSfx}`,
-      `is opening the floodgates with their <strong>first pint of the day</strong>! 🔓🍻${cigSfx}`,
-      `is wetting their whistle with the debut pint of the day! 🎨🍺${cigSfx}`,
-      `is officially in play with their <strong>1st pint</strong>! 🚩🍻${cigSfx}`
+      `is kickstarting their day with a cold <strong>1st pint</strong>! 🌅🍺`,
+      `is opening the floodgates with their <strong>first pint of the day</strong>! 🔓🍻`,
+      `is wetting their whistle with the debut pint of the day! 🎨🍺`,
+      `is officially in play with their <strong>1st pint</strong>! 🚩🍻`
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -1195,9 +1631,9 @@ function generateCreativeBeerNotificationText(beerName: string, abv: number, dat
   // Early morning (before 11 AM)
   if (hour < 11) {
     const options = [
-      `is starting shockingly early with a morning pint! 🌅👀${cigSfx}`,
-      `believes it's five o'clock somewhere! Breakfast pint! 🍳🍺${cigSfx}`,
-      `is beating the sun with an early doors pint! 🐓🍻${cigSfx}`
+      `is starting shockingly early with a morning pint! 🌅👀`,
+      `believes it's five o'clock somewhere! Breakfast pint! 🍳🍺`,
+      `is beating the sun with an early doors pint! 🐓🍻`
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -1205,9 +1641,9 @@ function generateCreativeBeerNotificationText(beerName: string, abv: number, dat
   // High ABV (>= 8%)
   if (abv >= 8) {
     const options = [
-      `is playing with fire! Sinking a heavy pint (${abv}% ABV)! 🔥🥴${cigSfx}`,
-      `is tackling an absolute unit of a pint at ${abv}% ABV! 🥊🍺${cigSfx}`,
-      `is cruising in the fast lane with a strong pint (${abv}%)! 🚀🍻${cigSfx}`
+      `is playing with fire! Sinking a heavy pint (${abv}% ABV)! 🔥🥴`,
+      `is tackling an absolute unit of a pint at ${abv}% ABV! 🥊🍺`,
+      `is cruising in the fast lane with a strong pint (${abv}%)! 🚀🍻`
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -1215,8 +1651,8 @@ function generateCreativeBeerNotificationText(beerName: string, abv: number, dat
   // Low ABV (<= 0.5% and > 0)
   if (abv <= 0.5 && abv > 0) {
     const options = [
-      `is staying responsible with a sober-safe pint (${abv}% ABV)! 😇🌱${cigSfx}`,
-      `is pacing themselves with a clear-headed pint (${abv}%)! 🧠🍻${cigSfx}`
+      `is staying responsible with a sober-safe pint (${abv}% ABV)! 😇🌱`,
+      `is pacing themselves with a clear-headed pint (${abv}%)! 🧠🍻`
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -1224,9 +1660,9 @@ function generateCreativeBeerNotificationText(beerName: string, abv: number, dat
   // Lunch pint (between 12 PM and 2 PM, i.e. 12 and 13)
   if (hour >= 12 && hour < 14) {
     const options = [
-      `is enjoying a sneaky lunch pint! Shhh... 🤫🍔🍺${cigSfx}`,
-      `is taking a very productive 'working lunch' with a cold pint! 💼🍻${cigSfx}`,
-      `is supplementing their diet with a liquid lunch! 🥗🍺${cigSfx}`
+      `is enjoying a sneaky lunch pint! Shhh... 🤫🍔🍺`,
+      `is taking a very productive 'working lunch' with a cold pint! 💼🍻`,
+      `is supplementing their diet with a liquid lunch! 🥗🍺`
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
@@ -1234,25 +1670,25 @@ function generateCreativeBeerNotificationText(beerName: string, abv: number, dat
   // Late Night (after 11 PM or before 4 AM)
   if (hour >= 23 || hour < 4) {
     const options = [
-      `is howling at the moon with a late-night pint! 🌕🐺${cigSfx}`,
-      `is refusing to let the night end! Sinking a midnight pint! 🦉🍻${cigSfx}`,
-      `is burning the midnight oil with a dark-hours pint! 🕯️🍺${cigSfx}`
+      `is howling at the moon with a late-night pint! 🌕🐺`,
+      `is refusing to let the night end! Sinking a midnight pint! 🦉🍻`,
+      `is burning the midnight oil with a dark-hours pint! 🕯️🍺`
     ];
     return options[Math.floor(Math.random() * options.length)];
   }
 
   // Standard but creative notifications for general logs
   const generalOptions = [
-    `is sinking a crisp pint! 🍺${cigSfx}`,
-    `is wetting their whistle with a lovely pint! 🍻${cigSfx}`,
-    `just poured a cold one! Down the hatch! ✨🍺${cigSfx}`,
-    `is absolutely demolishing a cold pint! 🦖🍻${cigSfx}`,
-    `is taking a big pull! Down the hatch! 🌊🍺${cigSfx}`,
-    `is treating themselves to a well-earned pint! 🎯🍻${cigSfx}`,
-    `is enjoying the nectar of the gods! 🍯🍺${cigSfx}`,
-    `is keeping the good times rolling with a cold pint! 🔄🍻${cigSfx}`,
-    `is having some quality pub chat over a cold pint! 🗣️🍺${cigSfx}`,
-    `is sinking a majestic pint! 🏰🍺${cigSfx}`
+    `is sinking a crisp pint! 🍺`,
+    `is wetting their whistle with a lovely pint! 🍻`,
+    `just poured a cold one! Down the hatch! ✨🍺`,
+    `is absolutely demolishing a cold pint! 🦖🍻`,
+    `is taking a big pull! Down the hatch! 🌊🍺`,
+    `is treating themselves to a well-earned pint! 🎯🍻`,
+    `is enjoying the nectar of the gods! 🍯🍺`,
+    `is keeping the good times rolling with a cold pint! 🔄🍻`,
+    `is having some quality pub chat over a cold pint! 🗣️🍺`,
+    `is sinking a majestic pint! 🏰🍺`
   ];
   return generalOptions[Math.floor(Math.random() * generalOptions.length)];
 }
@@ -1279,7 +1715,7 @@ interface CreateNotificationOptions {
   user: string;
   text: string;
   targetUser?: string;
-  type?: "post" | "comment" | "cheer" | "reaction" | "bender" | "invite" | "tag" | "imposter" | "beacon" | "chat";
+  type?: "post" | "comment" | "cheer" | "reaction" | "bender" | "first_pour" | "invite" | "tag" | "imposter" | "beacon" | "chat" | "friend_request" | "friend_accept";
   date?: string;
   idPrefix?: string;
 }
@@ -1303,6 +1739,26 @@ async function createAndDispatchNotification(options: CreateNotificationOptions)
   } catch (err) {
     console.error("Failed to create and dispatch notification:", err);
     return null;
+  }
+}
+
+// Fans a "community activity" notification (first pour of the day, imposter pint
+// outed, etc.) out to friends only, one targeted record per friend - these used to
+// be dispatched as a single untargeted record, which both the client's bell filter
+// and the FCM push path treat as "show/buzz literally everyone," friend or total
+// stranger alike. Whose friends to notify defaults to options.user (the person the
+// activity is about), but can be overridden - e.g. an imposter-outed notification is
+// about the outed poster, not whoever's reaction happened to tip the vote count.
+async function notifyFriendsOfActivity(
+  options: Omit<CreateNotificationOptions, "targetUser">,
+  friendsOf: string = options.user
+): Promise<void> {
+  const allUsers = await getAllUsers();
+  const lookupLower = friendsOf.toLowerCase().trim();
+  const subject = allUsers.find((u) => u.username.toLowerCase() === lookupLower);
+  const friends = subject?.friends || [];
+  for (const friend of friends) {
+    await createAndDispatchNotification({ ...options, targetUser: friend });
   }
 }
 
@@ -1382,6 +1838,36 @@ async function savePubChatMessage(msg: PubChatMessage): Promise<PubChatMessage> 
     }
   }
   return msg;
+}
+
+// Helper to get all content reports (newest first)
+async function getAllReports(): Promise<ContentReport[]> {
+  const firestore = getFirestoreInstance();
+  const list: ContentReport[] = [];
+  if (firestore && useFirestore) {
+    try {
+      const snap = await getDocs(collection(firestore, "reports"));
+      snap.forEach((docSnap) => {
+        list.push(docSnap.data() as ContentReport);
+      });
+    } catch (err) {
+      console.error("Firestore error reading reports:", err);
+    }
+  }
+  return list.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
+
+// Helper to save a content report
+async function saveReport(report: ContentReport): Promise<ContentReport> {
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "reports", report.id), sanitizeForFirestore(report));
+    } catch (err) {
+      console.error("Firestore error saving report:", err);
+    }
+  }
+  return report;
 }
 
 // Helper to get notifications
@@ -2006,6 +2492,133 @@ app.get("/api/users/:username/stats", async (req, res) => {
   }
 });
 
+// GET Weekly Recap - a fun, on-demand summary of the user's last 7 days. Deliberately
+// does NOT lead with volume: favorite beer and highest-rated pint come first, the raw
+// post count is secondary, and a quiet/dry week gets just as positive a framing as a
+// busy one (no week-over-week comparisons, no "you drank more" language anywhere).
+app.get("/api/users/:username/weekly-recap", async (req, res) => {
+  const { username } = req.params;
+  try {
+    const allBeersList = await getAllBeers();
+    const allUsersList = await getAllUsers();
+    const allPubsList = await getAllPubs();
+    const user = allUsersList.find((u) => u.username.toLowerCase() === username.toLowerCase());
+
+    const now = Date.now();
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+    const myLogsThisWeek = allBeersList.filter(
+      (l) =>
+        l.user.toLowerCase() === username.toLowerCase() &&
+        !isImposterLog(l) &&
+        now - new Date(l.date).getTime() <= weekMs &&
+        new Date(l.date).getTime() <= now
+    );
+
+    const postsThisWeek = myLogsThisWeek.length;
+
+    // Top beer this week
+    const beerCounts: Record<string, number> = {};
+    myLogsThisWeek.forEach((l) => {
+      const name = (l.beerName || "").trim();
+      if (name) beerCounts[name] = (beerCounts[name] || 0) + 1;
+    });
+    let topBeer: { name: string; count: number } | null = null;
+    Object.entries(beerCounts).forEach(([name, count]) => {
+      if (!topBeer || count > topBeer.count) topBeer = { name, count };
+    });
+
+    // Top pub this week
+    const pubCounts: Record<string, number> = {};
+    myLogsThisWeek.forEach((l) => {
+      if (l.pubId) pubCounts[l.pubId] = (pubCounts[l.pubId] || 0) + 1;
+    });
+    let topPub: { name: string; count: number } | null = null;
+    Object.entries(pubCounts).forEach(([pubId, count]) => {
+      if (!topPub || count > topPub.count) {
+        const pub = allPubsList.find((p) => p.id === pubId);
+        topPub = { name: pub?.name || "Unknown Pub", count };
+      }
+    });
+    const distinctPubsCount = Object.keys(pubCounts).length;
+
+    // Highest-rated pint this week
+    const rated = myLogsThisWeek.filter((l) => l.rating > 0);
+    const highestRated = rated.length
+      ? rated.reduce((best, l) => (l.rating > best.rating ? l : best))
+      : null;
+    const avgRating = rated.length
+      ? (rated.reduce((acc, l) => acc + l.rating, 0) / rated.length).toFixed(1)
+      : null;
+
+    const cheersReceived = myLogsThisWeek.reduce((acc, l) => acc + (l.cheers?.length || 0), 0);
+    const firstPourCount = myLogsThisWeek.filter((l) => l.isFirstOfDay).length;
+    const newStyleCount = myLogsThisWeek.filter((l) => l.isNewStyle).length;
+    const goblinModeCount = myLogsThisWeek.filter((l) => {
+      const hour = getLocalHour(l.date, l.timezone || "America/Los_Angeles");
+      return hour >= 0 && hour < 5;
+    }).length;
+    const dartComboCount = myLogsThisWeek.filter((l) => l.hadCig).length;
+    const totalBadges = firstPourCount + newStyleCount + goblinModeCount + dartComboCount;
+
+    const currentDryStreak = user?.stats?.currentDryStreak || 0;
+    const longestDryStreak = user?.stats?.longestDryStreak || 0;
+
+    // Week Archetype - a fun, single-line personality read on the week, picked by
+    // priority (most specific/notable pattern wins). None of these reward volume for
+    // its own sake - "The Regular" is about showing up, not drinking the most.
+    let archetype: { emoji: string; title: string; tagline: string };
+    if (postsThisWeek === 0) {
+      archetype = currentDryStreak >= 3
+        ? { emoji: "🧘", title: "The Monk", tagline: "Not a drop this week. Just vibes and hydration." }
+        : { emoji: "😌", title: "Taking It Easy", tagline: "A quiet week. No pints, no drama - sometimes that's the whole vibe." };
+    } else if (newStyleCount >= 2) {
+      archetype = { emoji: "🧭", title: "The Explorer", tagline: "Never the same pint twice. You tried something new every time you sat down." };
+    } else if (goblinModeCount >= 2) {
+      archetype = { emoji: "👺", title: "The Goblin", tagline: "The sun went down and so did your bedtime standards. Feral after midnight." };
+    } else if (cheersReceived >= 5 && cheersReceived >= postsThisWeek * 2) {
+      archetype = { emoji: "🦋", title: "The Crowd Favorite", tagline: "Every pint you posted got the crowd going. Basically a hype machine." };
+    } else if (avgRating && Number(avgRating) >= 4.5 && postsThisWeek >= 2) {
+      archetype = { emoji: "🍷", title: "The Connoisseur", tagline: "Nothing but 5-star pours this week. Discerning palate, zero regrets." };
+    } else if (firstPourCount >= 2) {
+      archetype = { emoji: "🌅", title: "The Early Bird", tagline: "First to check in, every time. The early pint gets the worm." };
+    } else if (distinctPubsCount >= 2) {
+      archetype = { emoji: "🗺️", title: "The Wanderer", tagline: "You made the rounds this week. No single pub could hold you." };
+    } else if (postsThisWeek >= 5) {
+      archetype = { emoji: "🍻", title: "The Regular", tagline: "You showed up, again and again. Your friends know exactly where to find you." };
+    } else {
+      archetype = { emoji: "🍺", title: "The Casual Sipper", tagline: "A balanced week. Nothing wild, nothing dry - just pints, at a reasonable pace." };
+    }
+
+    res.json({
+      windowDays: 7,
+      postsThisWeek,
+      topBeer,
+      topPub,
+      avgRating,
+      highestRated: highestRated
+        ? {
+            beerName: highestRated.beerName,
+            rating: highestRated.rating,
+            imageUrl: highestRated.imageUrl,
+            date: highestRated.date,
+          }
+        : null,
+      cheersReceived,
+      firstPourCount,
+      newStyleCount,
+      goblinModeCount,
+      dartComboCount,
+      totalBadges,
+      currentDryStreak,
+      longestDryStreak,
+      archetype,
+    });
+  } catch (err: any) {
+    console.error(`Failed to build weekly recap for ${username}:`, err);
+    res.status(500).json({ error: "Failed to build weekly recap" });
+  }
+});
+
 // POST Register FCM Token
 app.post("/api/register-fcm-token", async (req, res) => {
   const { token, user } = req.body;
@@ -2058,6 +2671,25 @@ app.post("/api/register-fcm-token", async (req, res) => {
   }
 });
 
+// POST Unregister an old/rotated FCM token (called by the client right before it registers a
+// freshly-rotated token for the same device, so stale tokens don't pile up and cause duplicate
+// push notifications - a device's old token stays valid until explicitly removed, it does not
+// automatically stop working just because a newer token was issued for the same install).
+app.post("/api/unregister-fcm-token", async (req, res) => {
+  const { token } = req.body;
+  if (!token) {
+    res.status(400).json({ error: "token is required" });
+    return;
+  }
+  try {
+    await removeFcmToken(token);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[FCM Server] Failed to unregister token:", err);
+    res.status(500).json({ error: "Failed to unregister token" });
+  }
+});
+
 // POST Send Test Push
 app.post("/api/send-test-push", async (req, res) => {
   const { user } = req.body;
@@ -2068,7 +2700,7 @@ app.post("/api/send-test-push", async (req, res) => {
   try {
     await sendFCMNotification(
       user,
-      "BeerReal System 🍻",
+      "BeerReel System 🍻",
       "A cold beer is calling your name! Everything's working through background FCM push."
     );
     res.json({ success: true, message: "Test push initiated" });
@@ -2083,7 +2715,7 @@ app.post("/api/beers", async (req, res) => {
   try {
     const rawUser = (req.body.user || "Anonymous").toString().trim();
     const user = rawUser || "Anonymous";
-    const { beerName, beerStyle, abv, date, rating, comment, imageUrl, hadCig, pubId } = req.body;
+    const { beerName, beerStyle, abv, date, rating, comment, imageUrl, hadCig, pubId, timezone, location } = req.body;
 
     if (!user || !beerName || !beerStyle || abv === undefined || !date || rating === undefined) {
       res.status(400).json({ error: "Missing required fields" });
@@ -2093,7 +2725,7 @@ app.post("/api/beers", async (req, res) => {
     const normalized = normalizeBeerName(beerName);
     const cleanedBeerName = normalized.name || beerName;
     const cleanedStyle = (beerStyle && beerStyle !== "Other") ? beerStyle : (normalized.style || beerStyle || "Lager");
-    const cleanedAbv = Number(abv) || (normalized.abv || 5.0);
+    const cleanedAbv = clampAbv(Number(abv) || (normalized.abv || 5.0));
 
     let processedImageUrl = imageUrl || undefined;
     if (processedImageUrl && typeof processedImageUrl === "string" && processedImageUrl.startsWith("data:image/")) {
@@ -2107,12 +2739,14 @@ app.post("/api/beers", async (req, res) => {
       beerStyle: cleanedStyle,
       abv: cleanedAbv,
       date,
-      rating: Number(rating),
+      rating: clampRating(Number(rating)),
       cheers: [],
       comment: comment || "",
       imageUrl: processedImageUrl,
       hadCig: !!hadCig,
-      pubId: pubId || undefined
+      pubId: pubId || undefined,
+      timezone: isValidTimeZone(timezone) ? timezone : undefined,
+      location: (typeof location === "string" && location.trim()) ? location.trim().slice(0, 100) : undefined
     };
 
     const saved = await saveBeerLog(newLog);
@@ -2129,17 +2763,17 @@ app.post("/api/beers", async (req, res) => {
           (l) => l.user === saved.user && l.date.split("T")[0] === checkInDateStr
         );
 
-        // 1. Only send global post notification for the FIRST beer of the day for that user
+        // 1. Only send a post notification for the FIRST beer of the day for that user -
+        // friends only, not the whole user base.
         if (userLogsToday.length === 1) {
           const notificationText = generateCreativeBeerNotificationText(
             saved.beerName,
             Number(saved.abv),
             saved.date,
-            !!saved.hadCig,
             userLogsToday.length
           );
 
-          await createAndDispatchNotification({
+          await notifyFriendsOfActivity({
             user: saved.user,
             text: notificationText,
             date: saved.date,
@@ -2152,7 +2786,8 @@ app.post("/api/beers", async (req, res) => {
           const tags = await getValidTags(saved.comment);
           for (const taggedUser of tags) {
             if (taggedUser.toLowerCase().trim() !== saved.user.toLowerCase().trim()) {
-              const snippet = saved.comment.length > 40 ? saved.comment.substring(0, 40) + "..." : saved.comment;
+              const rawSnippet = saved.comment.length > 40 ? saved.comment.substring(0, 40) + "..." : saved.comment;
+              const snippet = escapeHtml(rawSnippet);
               await createAndDispatchNotification({
                 idPrefix: "notif-tag",
                 user: saved.user,
@@ -2165,14 +2800,38 @@ app.post("/api/beers", async (req, res) => {
           }
         }
 
-        // 2. Only send global bender alert ONCE when they hit 4 beers in a single day
-        if (userLogsToday.length === 4) {
-          await createAndDispatchNotification({
-            idPrefix: `notif-bender-4`,
+        // 2. First Pour of the Day - whoever is first (across ALL users) to check
+        // in each calendar day gets a fun, positive callout. Unlike the old
+        // "bender alert" this rewards being early, not drinking a lot. Posts
+        // the community has flagged as fake (3+ Imposter Pint votes) don't
+        // count toward this - or anything else below.
+        const legitBeersList = allBeersList.filter((l) => !isImposterLog(l));
+        const otherLogsSameDay = legitBeersList.filter(
+          (l) => l.id !== saved.id && l.date.split("T")[0] === checkInDateStr
+        );
+        const isFirstOfDay = otherLogsSameDay.every(
+          (l) => new Date(l.date).getTime() >= new Date(saved.date).getTime()
+        );
+
+        // 3. New Style Unlocked - first time this user has logged this beer style.
+        const priorStyleLogs = legitBeersList.filter(
+          (l) => l.id !== saved.id &&
+            l.user === saved.user &&
+            (l.beerStyle || "").toLowerCase() === (saved.beerStyle || "").toLowerCase()
+        );
+        const isNewStyle = priorStyleLogs.length === 0;
+
+        if (isFirstOfDay || isNewStyle) {
+          await saveBeerLog({ ...saved, isFirstOfDay, isNewStyle });
+        }
+
+        if (isFirstOfDay) {
+          await notifyFriendsOfActivity({
+            idPrefix: "notif-first-pour",
             user: saved.user,
-            text: `🚨 BENDER ALERT! <strong>${saved.user}</strong> is on a bender! Logged pint #4 today! 🥴🔥🍻`,
+            text: `🌅 <strong>${escapeHtml(saved.user)}</strong> poured the first pint of the day! Who's next?`,
             date: saved.date,
-            type: "bender",
+            type: "first_pour",
           });
         }
       } catch (err) {
@@ -2197,7 +2856,8 @@ app.post("/api/beers", async (req, res) => {
 app.post("/api/beers/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { beerName, beerStyle, abv, rating, comment, hadCig } = req.body;
+    const { beerName, beerStyle, abv, rating, comment, hadCig, currentUser, location } = req.body;
+    const requester = (currentUser || req.query.currentUser || req.headers["x-current-user"] || "").toString();
 
     let log = await findBeerLogById(id);
     if (!log) {
@@ -2210,12 +2870,20 @@ app.post("/api/beers/:id", async (req, res) => {
       return;
     }
 
+    const isOwner = requester.toLowerCase().trim() === (log.user || "").toLowerCase().trim();
+    const isAdmin = isSeymoreBeers(requester);
+    if (!isOwner && !isAdmin) {
+      res.status(403).json({ error: "Unauthorized. You can only edit your own posts." });
+      return;
+    }
+
     if (beerName !== undefined) log.beerName = beerName;
     if (beerStyle !== undefined) log.beerStyle = beerStyle;
-    if (abv !== undefined) log.abv = Number(abv);
-    if (rating !== undefined) log.rating = Number(rating);
+    if (abv !== undefined) log.abv = clampAbv(Number(abv));
+    if (rating !== undefined) log.rating = clampRating(Number(rating));
     if (comment !== undefined) log.comment = comment;
     if (hadCig !== undefined) log.hadCig = !!hadCig;
+    if (location !== undefined) log.location = (typeof location === "string" && location.trim()) ? location.trim().slice(0, 100) : undefined;
 
     await saveBeerLog(log);
 
@@ -2311,7 +2979,11 @@ app.post("/api/beers/:id/react", async (req, res) => {
     // Trigger Notification if reacting to someone else's post
     try {
       if (updated.user && updated.user.toLowerCase() !== username.toLowerCase()) {
-        let reactionLabel = reactionType;
+        // reactionType is client-supplied and unvalidated - only ever use it verbatim
+        // when it matches a known reaction; otherwise escape it before it can reach
+        // notification HTML (the client won't normally send anything outside this
+        // list, but nothing stops a direct API call from trying to).
+        let reactionLabel = escapeHtml(reactionType);
         if (reactionType === "creamy") reactionLabel = "Creamy 🍺";
         else if (reactionType === "cheers") reactionLabel = "Cheers 🍻";
         else if (reactionType === "fomo") reactionLabel = "FOMO Alert 🚨";
@@ -2333,19 +3005,21 @@ app.post("/api/beers/:id/react", async (req, res) => {
           type: "reaction",
         });
 
-        // 3. Global notification ONLY when a pint is officially outed as an imposter (reaches 3 dislike/imposter votes)
+        // 3. Notify the outed poster's friends ONLY when a pint is officially outed as an
+        // imposter (reaches 3 dislike/imposter votes) - not the whole user base.
         if (reactionType === "dislike") {
           const dislikeCount = (updated.reactions?.["dislike"]?.length || 0) + (updated.reactions?.["imposter"]?.length || 0);
           if (dislikeCount === 3) {
+            const safeUpdatedUser = escapeHtml(updated.user);
             const imposterNotifText = isGuinness
-              ? `🚨 IMPOSTER PINT OUTED! 🕵️ caught <strong>${updated.user}</strong> logging a fake pint of <strong>Guinness</strong>!`
-              : `🚨 IMPOSTER PINT OUTED! 🕵️ caught <strong>${updated.user}</strong> logging a fake pint!`;
-            await createAndDispatchNotification({
+              ? `🚨 IMPOSTER PINT OUTED! 🕵️ caught <strong>${safeUpdatedUser}</strong> logging a fake pint of <strong>Guinness</strong>!`
+              : `🚨 IMPOSTER PINT OUTED! 🕵️ caught <strong>${safeUpdatedUser}</strong> logging a fake pint!`;
+            await notifyFriendsOfActivity({
               idPrefix: "imposter",
               user: username,
               text: imposterNotifText,
               type: "imposter",
-            });
+            }, updated.user);
           }
         }
       }
@@ -2374,20 +3048,29 @@ app.delete("/api/beers/:id", async (req, res) => {
 
   const log = await findBeerLogById(id);
 
-  if (log) {
-    const beerUser = log.user || "";
-    const isOwner = currentUser.toLowerCase().trim() === beerUser.toLowerCase().trim();
-    const isAdmin = isSeymoreBeers(currentUser);
-
-    if (!isOwner && !isAdmin) {
-      res.status(403).json({ error: "Unauthorized. You can only delete your own posts." });
-      return;
-    }
+  if (!log) {
+    res.status(404).json({ error: "Post not found." });
+    return;
   }
 
-  const beerUserToUpdate = log?.user;
+  const beerUser = log.user || "";
+  const isOwner = currentUser.toLowerCase().trim() === beerUser.toLowerCase().trim();
+  const isAdmin = isSeymoreBeers(currentUser);
+
+  if (!isOwner && !isAdmin) {
+    res.status(403).json({ error: "Unauthorized. You can only delete your own posts." });
+    return;
+  }
+
+  const beerUserToUpdate = log.user;
 
   await deleteBeerLog(id);
+
+  if (log.imageUrl) {
+    deleteStorageObjectForImageUrl(log.imageUrl).catch((e) =>
+      console.warn("Error deleting Storage object after post delete:", e)
+    );
+  }
 
   if (beerUserToUpdate) {
     // Recalculate user statistics asynchronously
@@ -2418,7 +3101,7 @@ app.post("/api/beers/:id/comments", async (req, res) => {
   // Trigger Notification if commenting on someone else's post
   try {
     if (updated.user !== user) {
-      const snippet = text.length > 30 ? text.substring(0, 30) + "..." : text;
+      const snippet = escapeHtml(text.length > 30 ? text.substring(0, 30) + "..." : text);
       const isGuinness = isGuinnessBeerName(updated.beerName);
       const notifText = isGuinness
         ? `commented on your pint of <strong>Guinness</strong>: "${snippet}" 💬`
@@ -2439,7 +3122,7 @@ app.post("/api/beers/:id/comments", async (req, res) => {
         taggedUser.toLowerCase().trim() !== user.toLowerCase().trim() &&
         taggedUser.toLowerCase().trim() !== updated.user.toLowerCase().trim()
       ) {
-        const snippet = text.length > 30 ? text.substring(0, 30) + "..." : text;
+        const snippet = escapeHtml(text.length > 30 ? text.substring(0, 30) + "..." : text);
         await createAndDispatchNotification({
           idPrefix: "notif-tag",
           user: user,
@@ -2504,12 +3187,13 @@ app.post("/api/beers/:id/comments/:commentId/reactions", async (req, res) => {
   try {
     const comment = (updated.comments || []).find((c) => c.id === commentId);
     if (comment && comment.user !== user) {
-      const snippet = comment.text.length > 25 ? comment.text.substring(0, 25) + "..." : comment.text;
+      const snippet = escapeHtml(comment.text.length > 25 ? comment.text.substring(0, 25) + "..." : comment.text);
+      const safeReaction = escapeHtml(reaction);
       await createAndDispatchNotification({
         idPrefix: "notif-comment-react",
         user: user,
         targetUser: comment.user,
-        text: `reacted ${reaction} to your comment: "${snippet}"`,
+        text: `reacted ${safeReaction} to your comment: "${snippet}"`,
         type: "reaction",
       });
     }
@@ -2559,23 +3243,40 @@ app.post("/api/login", async (req, res) => {
   }
 
   const userPassword = user.password || "Pints!";
-  if (userPassword !== password) {
+  if (!verifyPassword(password, userPassword)) {
     res.status(401).json({ error: "Incorrect password. (The default is 'Pints!' for existing users)." });
     return;
   }
 
-  res.json({ success: true, user });
+  // Lazily migrate legacy plaintext passwords to a salted hash now that we know it's correct.
+  if (!isHashedPassword(userPassword)) {
+    user.password = hashPassword(password);
+    await saveUser(user);
+  }
+
+  const { password: _pw, recoveryCodeHash: _rch, ...safeUser } = user;
+  res.json({ success: true, user: safeUser });
 });
 
 // GET Users
 app.get("/api/users", async (req, res) => {
   const list = await getAllUsers();
-  res.json(list);
+  const viewerUsername = (req.query.viewerUsername || "").toString().trim().toLowerCase();
+  // Never send password hashes to clients - nothing client-side needs to read this back.
+  // Email is likewise stripped from this bulk listing - it's not displayed anywhere in the
+  // app, so the only legitimate reason to see one is a user loading their own profile to
+  // edit it, which is why the requesting user's own email (if identified) is kept.
+  res.json(
+    list.map(({ password, email, recoveryCodeHash, ...rest }) => ({
+      ...rest,
+      ...(viewerUsername && rest.username.toLowerCase() === viewerUsername ? { email } : {}),
+    }))
+  );
 });
 
 // POST User Profile
 app.post("/api/users", async (req, res) => {
-  const { username, favoriteStyle, avatar, bio, password, realName, photoUrl, email } = req.body;
+  const { username, favoriteStyle, avatar, bio, password, currentPassword, realName, photoUrl, email } = req.body;
 
   if (!username || !favoriteStyle || !avatar) {
     res.status(400).json({ error: "Missing required profile fields" });
@@ -2588,6 +3289,34 @@ app.post("/api/users", async (req, res) => {
   );
 
   const existingUser = existingIndex !== -1 ? allUsersList[existingIndex] : null;
+
+  // New accounts only: usernames can't contain whitespace, since the @mention parser
+  // (both while typing and when rendering existing text) only matches [a-zA-Z0-9_-] -
+  // a username with a space would be unmentionable/mis-linked everywhere in the app.
+  if (!existingUser && /\s/.test(username)) {
+    res.status(400).json({ error: "Usernames can't contain spaces - try an underscore or just squish it together." });
+    return;
+  }
+
+  // New passwords (new account, or an existing account changing its password) need a
+  // sane minimum length - there was previously no floor at all, so a 1-character
+  // password was accepted.
+  if (password && password.length < 4) {
+    res.status(400).json({ error: "Password must be at least 4 characters." });
+    return;
+  }
+
+  // Require proof of identity before touching an EXISTING account. This endpoint used
+  // to silently overwrite any account's profile - including its password - given
+  // nothing but its username, which is public everywhere in the app. New account
+  // creation is unaffected since there's nothing to authenticate against yet.
+  if (existingUser) {
+    const storedPassword = existingUser.password || "Pints!";
+    if (!verifyPassword((currentPassword || "").toString(), storedPassword)) {
+      res.status(401).json({ error: "Incorrect current password. Re-enter your current password to save changes." });
+      return;
+    }
+  }
 
   // Check duplicate email if provided
   if (email && email.trim()) {
@@ -2603,16 +3332,38 @@ app.post("/api/users", async (req, res) => {
     }
   }
 
+  // New accounts get a one-time recovery code (this app has no email infra to send a
+  // reset link through, so this is the self-service account-recovery mechanism). It's
+  // generated here, hashed at rest, and the ONLY plaintext copy is returned once below.
+  const newRecoveryCode = !existingUser ? generateRecoveryCode() : undefined;
+
+  // Profile photos arrive from the client as a raw base64 data URL (the crop step never
+  // uploads it itself) and need converting to a real Storage-backed URL before they can
+  // be saved - exactly like POST /api/beers already does for post photos. Skipping this
+  // was the actual bug: sanitizeForFirestore()'s base64 safeguard only recognizes the
+  // "imageUrl"/"avatar" keys by name, so a raw base64 photoUrl slipped past it and hit
+  // the 50KB field-size safeguard instead, which silently strips it to an empty string -
+  // every profile photo upload was quietly discarded with no error ever shown.
+  let resolvedPhotoUrl = photoUrl;
+  if (typeof resolvedPhotoUrl === "string" && resolvedPhotoUrl.startsWith("data:image/")) {
+    resolvedPhotoUrl = await saveBase64ToStorage(resolvedPhotoUrl);
+  }
+
   const profile: UserProfile = {
     username,
     favoriteStyle,
     avatar,
     bio: bio || "",
     joinedDate: existingUser ? existingUser.joinedDate : new Date().toISOString().split("T")[0],
-    password: password || (existingUser ? (existingUser.password || "Pints!") : "Pints!"),
+    password: password
+      ? hashPassword(password)
+      : (existingUser ? existingUser.password : hashPassword("Pints!")),
+    recoveryCodeHash: newRecoveryCode ? hashPassword(newRecoveryCode) : (existingUser ? existingUser.recoveryCodeHash : undefined),
     realName: realName || (existingUser ? existingUser.realName : undefined),
-    photoUrl: photoUrl !== undefined ? photoUrl : (existingUser ? existingUser.photoUrl : undefined),
-    email: email !== undefined ? (email.trim() || undefined) : (existingUser ? existingUser.email : undefined)
+    photoUrl: resolvedPhotoUrl !== undefined ? (resolvedPhotoUrl || undefined) : (existingUser ? existingUser.photoUrl : undefined),
+    email: email !== undefined ? (email.trim() || undefined) : (existingUser ? existingUser.email : undefined),
+    friends: existingUser ? (existingUser.friends || []) : [],
+    friendRequests: existingUser ? (existingUser.friendRequests || []) : []
   };
 
   const isNewUser = !existingUser;
@@ -2623,7 +3374,7 @@ app.post("/api/users", async (req, res) => {
       const notif: AppNotification = {
         id: "newuser-" + username + "-" + Date.now(),
         user: username,
-        text: `🎉 A new user, <strong>${realName || username}</strong>, just joined BeerReal! Give them a warm welcome! 🍻`,
+        text: `🎉 A new user, <strong>${escapeHtml(realName || username)}</strong>, just joined BeerReel! Give them a warm welcome! 🍻`,
         date: new Date().toISOString(),
         readBy: [],
         type: "post"
@@ -2635,16 +3386,459 @@ app.post("/api/users", async (req, res) => {
     }
   }
 
-  res.json(saved);
+  const { password: _savedPw, recoveryCodeHash: _savedRch, ...safeSaved } = saved;
+  res.json(newRecoveryCode ? { ...safeSaved, recoveryCode: newRecoveryCode } : safeSaved);
+});
+
+// POST Reset Password via Recovery Code (no email infra in this app - the recovery
+// code shown once at signup/regeneration is the self-service account-recovery path)
+app.post("/api/users/:username/reset-password", async (req, res) => {
+  const username = (req.params.username || "").toString();
+  const recoveryCode = normalizeRecoveryCode(req.body.recoveryCode);
+  const newPassword = (req.body.newPassword || "").toString();
+
+  if (!recoveryCode || !newPassword) {
+    res.status(400).json({ error: "Recovery code and new password are required." });
+    return;
+  }
+  if (newPassword.length < 4) {
+    res.status(400).json({ error: "Password must be at least 4 characters." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const user = allUsers.find((u) => u.username.toLowerCase() === username.toLowerCase());
+  if (!user) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  if (!user.recoveryCodeHash || !verifyPassword(recoveryCode, user.recoveryCodeHash)) {
+    res.status(401).json({ error: "That recovery code doesn't match. Double-check it or contact support if you've lost it." });
+    return;
+  }
+
+  // Rotate the recovery code on every successful use, same principle as a single-use
+  // token - a leaked-then-used code shouldn't keep working afterward.
+  const nextRecoveryCode = generateRecoveryCode();
+  user.password = hashPassword(newPassword);
+  user.recoveryCodeHash = hashPassword(nextRecoveryCode);
+  await saveUser(user);
+
+  res.json({ success: true, recoveryCode: nextRecoveryCode });
+});
+
+// POST Regenerate Recovery Code (for already-logged-in users, including accounts
+// created before this feature existed and therefore have no recovery code yet)
+app.post("/api/users/:username/recovery-code", async (req, res) => {
+  const username = (req.params.username || "").toString();
+  const currentPassword = (req.body.currentPassword || "").toString();
+
+  const allUsers = await getAllUsers();
+  const user = allUsers.find((u) => u.username.toLowerCase() === username.toLowerCase());
+  if (!user) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  const storedPassword = user.password || "Pints!";
+  if (!verifyPassword(currentPassword, storedPassword)) {
+    res.status(401).json({ error: "Incorrect current password." });
+    return;
+  }
+
+  const recoveryCode = generateRecoveryCode();
+  user.recoveryCodeHash = hashPassword(recoveryCode);
+  await saveUser(user);
+
+  res.json({ success: true, recoveryCode });
+});
+
+// POST Send Friend Request
+app.post("/api/friends/request", async (req, res) => {
+  const from = (req.body.from || "").toString().trim();
+  const to = (req.body.to || "").toString().trim();
+
+  if (!from || !to) {
+    res.status(400).json({ error: "Both 'from' and 'to' usernames are required." });
+    return;
+  }
+  if (from.toLowerCase() === to.toLowerCase()) {
+    res.status(400).json({ error: "You can't friend request yourself." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const fromUser = allUsers.find((u) => u.username.toLowerCase() === from.toLowerCase());
+  const toUser = allUsers.find((u) => u.username.toLowerCase() === to.toLowerCase());
+
+  if (!fromUser || !toUser) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  const fromFriends = fromUser.friends || [];
+  if (fromFriends.some((f) => f.toLowerCase() === to.toLowerCase())) {
+    res.status(400).json({ error: "You're already friends." });
+    return;
+  }
+
+  const fromBlockedTo = (fromUser.blockedUsers || []).some((b) => b.toLowerCase() === to.toLowerCase());
+  const toBlockedFrom = (toUser.blockedUsers || []).some((b) => b.toLowerCase() === from.toLowerCase());
+  if (fromBlockedTo || toBlockedFrom) {
+    res.status(403).json({ error: "Unable to send friend request." });
+    return;
+  }
+
+  // If the other user already sent us a request, auto-accept instead of leaving two pending requests
+  const toAlreadyRequestedUs = (fromUser.friendRequests || []).some((r) => r.toLowerCase() === to.toLowerCase());
+  if (toAlreadyRequestedUs) {
+    fromUser.friends = [...fromFriends, toUser.username];
+    fromUser.friendRequests = (fromUser.friendRequests || []).filter((r) => r.toLowerCase() !== to.toLowerCase());
+    toUser.friends = [...(toUser.friends || []), fromUser.username];
+    await saveUser(fromUser);
+    await saveUser(toUser);
+    await createAndDispatchNotification({
+      idPrefix: "notif-friend-accept",
+      user: fromUser.username,
+      targetUser: toUser.username,
+      text: `is now friends with you! 🍻`,
+      type: "friend_accept",
+    });
+    res.json({ status: "friends", users: stripPasswords([fromUser, toUser]) });
+    return;
+  }
+
+  const toRequests = toUser.friendRequests || [];
+  if (toRequests.some((r) => r.toLowerCase() === from.toLowerCase())) {
+    res.json({ status: "already_requested", users: stripPasswords([toUser]) });
+    return;
+  }
+
+  toUser.friendRequests = [...toRequests, fromUser.username];
+  await saveUser(toUser);
+
+  await createAndDispatchNotification({
+    idPrefix: "notif-friend-request",
+    user: fromUser.username,
+    targetUser: toUser.username,
+    text: `wants to be your friend!`,
+    type: "friend_request",
+  });
+
+  res.json({ status: "requested", users: stripPasswords([toUser]) });
+});
+
+// POST Accept Friend Request
+app.post("/api/friends/accept", async (req, res) => {
+  const user = (req.body.user || "").toString().trim();
+  const requester = (req.body.requester || "").toString().trim();
+
+  if (!user || !requester) {
+    res.status(400).json({ error: "Both 'user' and 'requester' usernames are required." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const userProfile = allUsers.find((u) => u.username.toLowerCase() === user.toLowerCase());
+  const requesterProfile = allUsers.find((u) => u.username.toLowerCase() === requester.toLowerCase());
+
+  if (!userProfile || !requesterProfile) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  const hasRequest = (userProfile.friendRequests || []).some((r) => r.toLowerCase() === requester.toLowerCase());
+  if (!hasRequest) {
+    res.status(400).json({ error: "No pending friend request from this user." });
+    return;
+  }
+
+  userProfile.friendRequests = (userProfile.friendRequests || []).filter((r) => r.toLowerCase() !== requester.toLowerCase());
+  userProfile.friends = [...(userProfile.friends || []), requesterProfile.username];
+  requesterProfile.friends = [...(requesterProfile.friends || []), userProfile.username];
+
+  await saveUser(userProfile);
+  await saveUser(requesterProfile);
+
+  await createAndDispatchNotification({
+    idPrefix: "notif-friend-accept",
+    user: userProfile.username,
+    targetUser: requesterProfile.username,
+    text: `accepted your friend request! 🍻`,
+    type: "friend_accept",
+  });
+
+  res.json({ status: "friends", users: stripPasswords([userProfile, requesterProfile]) });
+});
+
+// POST Decline Friend Request
+app.post("/api/friends/decline", async (req, res) => {
+  const user = (req.body.user || "").toString().trim();
+  const requester = (req.body.requester || "").toString().trim();
+
+  if (!user || !requester) {
+    res.status(400).json({ error: "Both 'user' and 'requester' usernames are required." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const userProfile = allUsers.find((u) => u.username.toLowerCase() === user.toLowerCase());
+  if (!userProfile) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  userProfile.friendRequests = (userProfile.friendRequests || []).filter((r) => r.toLowerCase() !== requester.toLowerCase());
+  await saveUser(userProfile);
+
+  res.json({ status: "declined", users: stripPasswords([userProfile]) });
+});
+
+// POST Cancel a Friend Request I Sent
+app.post("/api/friends/cancel", async (req, res) => {
+  const user = (req.body.user || "").toString().trim();
+  const target = (req.body.target || "").toString().trim();
+
+  if (!user || !target) {
+    res.status(400).json({ error: "Both 'user' and 'target' usernames are required." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const targetProfile = allUsers.find((u) => u.username.toLowerCase() === target.toLowerCase());
+  if (!targetProfile) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  targetProfile.friendRequests = (targetProfile.friendRequests || []).filter((r) => r.toLowerCase() !== user.toLowerCase());
+  await saveUser(targetProfile);
+
+  res.json({ status: "cancelled", users: stripPasswords([targetProfile]) });
+});
+
+// POST Remove Friend
+app.post("/api/friends/remove", async (req, res) => {
+  const user = (req.body.user || "").toString().trim();
+  const friend = (req.body.friend || "").toString().trim();
+
+  if (!user || !friend) {
+    res.status(400).json({ error: "Both 'user' and 'friend' usernames are required." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const userProfile = allUsers.find((u) => u.username.toLowerCase() === user.toLowerCase());
+  const friendProfile = allUsers.find((u) => u.username.toLowerCase() === friend.toLowerCase());
+
+  if (!userProfile) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  userProfile.friends = (userProfile.friends || []).filter((f) => f.toLowerCase() !== friend.toLowerCase());
+  await saveUser(userProfile);
+
+  if (friendProfile) {
+    friendProfile.friends = (friendProfile.friends || []).filter((f) => f.toLowerCase() !== user.toLowerCase());
+    await saveUser(friendProfile);
+  }
+
+  res.json({ status: "removed", users: stripPasswords(friendProfile ? [userProfile, friendProfile] : [userProfile]) });
+});
+
+// POST Ping - a lightweight "the app was just opened" heartbeat, used to distinguish
+// genuinely inactive accounts from active ones on the dry-streak leaderboard (see
+// Statistics.tsx TEMPLE_INACTIVITY_DAYS) without requiring a fresh beer post. Cheap,
+// low-stakes, fire-and-forget - deliberately no auth beyond the username existing.
+app.post("/api/users/:username/ping", async (req, res) => {
+  const { username } = req.params;
+  try {
+    const allUsers = await getAllUsers();
+    const userProfile = allUsers.find((u) => u.username.toLowerCase() === username.toLowerCase());
+    if (!userProfile) {
+      res.status(404).json({ error: "User not found." });
+      return;
+    }
+    userProfile.lastActiveDate = new Date().toISOString();
+    await saveUser(userProfile);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`Failed to record ping for ${username}:`, err);
+    res.status(500).json({ error: "Failed to record activity." });
+  }
+});
+
+// POST Block User - hides the target's content from the blocker and severs any friendship
+app.post("/api/users/:username/block", async (req, res) => {
+  const { username } = req.params;
+  const targetUsername = (req.body.targetUsername || "").toString().trim();
+  const requester = (req.body.currentUser || req.query.currentUser || req.headers["x-current-user"] || "").toString();
+
+  if (requester.toLowerCase().trim() !== username.toLowerCase().trim() && !isSeymoreBeers(requester)) {
+    res.status(403).json({ error: "Unauthorized. You can only manage your own block list." });
+    return;
+  }
+
+  if (!targetUsername) {
+    res.status(400).json({ error: "'targetUsername' is required." });
+    return;
+  }
+  if (targetUsername.toLowerCase() === username.toLowerCase()) {
+    res.status(400).json({ error: "You can't block yourself." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const userProfile = allUsers.find((u) => u.username.toLowerCase() === username.toLowerCase());
+  const targetProfile = allUsers.find((u) => u.username.toLowerCase() === targetUsername.toLowerCase());
+
+  if (!userProfile) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  const blocked = new Set((userProfile.blockedUsers || []).map((b) => b.toLowerCase()));
+  blocked.add(targetUsername.toLowerCase());
+  userProfile.blockedUsers = Array.from(blocked);
+
+  // Blocking severs any existing friendship in both directions, and clears
+  // any pending request either side sent so blocking can't be worked around.
+  userProfile.friends = (userProfile.friends || []).filter((f) => f.toLowerCase() !== targetUsername.toLowerCase());
+  userProfile.friendRequests = (userProfile.friendRequests || []).filter((f) => f.toLowerCase() !== targetUsername.toLowerCase());
+  await saveUser(userProfile);
+
+  if (targetProfile) {
+    targetProfile.friends = (targetProfile.friends || []).filter((f) => f.toLowerCase() !== username.toLowerCase());
+    targetProfile.friendRequests = (targetProfile.friendRequests || []).filter((f) => f.toLowerCase() !== username.toLowerCase());
+    await saveUser(targetProfile);
+  }
+
+  res.json({ status: "blocked", users: stripPasswords(targetProfile ? [userProfile, targetProfile] : [userProfile]) });
+});
+
+// POST Unblock User
+app.post("/api/users/:username/unblock", async (req, res) => {
+  const { username } = req.params;
+  const targetUsername = (req.body.targetUsername || "").toString().trim();
+  const requester = (req.body.currentUser || req.query.currentUser || req.headers["x-current-user"] || "").toString();
+
+  if (requester.toLowerCase().trim() !== username.toLowerCase().trim() && !isSeymoreBeers(requester)) {
+    res.status(403).json({ error: "Unauthorized. You can only manage your own block list." });
+    return;
+  }
+
+  if (!targetUsername) {
+    res.status(400).json({ error: "'targetUsername' is required." });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const userProfile = allUsers.find((u) => u.username.toLowerCase() === username.toLowerCase());
+  if (!userProfile) {
+    res.status(404).json({ error: "User not found." });
+    return;
+  }
+
+  userProfile.blockedUsers = (userProfile.blockedUsers || []).filter((b) => b.toLowerCase() !== targetUsername.toLowerCase());
+  await saveUser(userProfile);
+
+  res.json({ status: "unblocked", users: stripPasswords([userProfile]) });
+});
+
+// POST Submit a content/user report
+app.post("/api/reports", async (req, res) => {
+  const reporterUsername = (req.body.reporterUsername || "").toString().trim();
+  const targetType = (req.body.targetType || "").toString().trim();
+  const targetId = (req.body.targetId || "").toString().trim();
+  const targetUsername = req.body.targetUsername ? req.body.targetUsername.toString().trim() : undefined;
+  const reason = (req.body.reason || "").toString().trim();
+  const note = req.body.note ? req.body.note.toString().trim().slice(0, 500) : undefined;
+
+  if (!reporterUsername || !targetType || !targetId || !reason) {
+    res.status(400).json({ error: "reporterUsername, targetType, targetId, and reason are required." });
+    return;
+  }
+  if (!["user", "post", "comment"].includes(targetType)) {
+    res.status(400).json({ error: "targetType must be 'user', 'post', or 'comment'." });
+    return;
+  }
+
+  const report: ContentReport = {
+    id: `report-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    reporterUsername,
+    targetType: targetType as ContentReport["targetType"],
+    targetId,
+    targetUsername,
+    reason,
+    note,
+    date: new Date().toISOString(),
+    status: "open",
+  };
+
+  await saveReport(report);
+  res.json({ status: "submitted", report });
+});
+
+// GET all reports (admin only)
+app.get("/api/reports", async (req, res) => {
+  const currentUser = (req.query.currentUser || req.headers["x-current-user"] || "").toString();
+  if (!isSeymoreBeers(currentUser)) {
+    res.status(403).json({ error: "Unauthorized. Admin access required." });
+    return;
+  }
+  const reports = await getAllReports();
+  res.json(reports);
+});
+
+// POST resolve a report (admin only)
+app.post("/api/reports/:id/resolve", async (req, res) => {
+  const currentUser = (req.body.currentUser || "").toString();
+  if (!isSeymoreBeers(currentUser)) {
+    res.status(403).json({ error: "Unauthorized. Admin access required." });
+    return;
+  }
+  const { id } = req.params;
+  const reports = await getAllReports();
+  const report = reports.find((r) => r.id === id);
+  if (!report) {
+    res.status(404).json({ error: "Report not found." });
+    return;
+  }
+  report.status = "resolved";
+  await saveReport(report);
+  res.json({ status: "resolved", report });
 });
 
 // DELETE User Profile and clean up their beer logs
 app.delete("/api/users/:username", async (req, res) => {
   const { username } = req.params;
-  const currentUser = req.query.currentUser || req.headers["x-current-user"];
-  if (!isSeymoreBeers(currentUser)) {
-    res.status(403).json({ error: "Unauthorized. Only Seymore Beers can delete profiles." });
+  const currentUser = (req.query.currentUser || req.headers["x-current-user"] || "").toString();
+  const isAdmin = isSeymoreBeers(currentUser);
+  const isSelf = currentUser.toLowerCase() === username.toLowerCase();
+
+  if (!isAdmin && !isSelf) {
+    res.status(403).json({ error: "Unauthorized. You can only delete your own profile." });
     return;
+  }
+
+  // Self-service deletion requires re-entering the account password, since
+  // this app has no real session/auth tokens - the password is the only
+  // proof of ownership available.
+  if (isSelf && !isAdmin) {
+    const password = (req.body && req.body.password ? req.body.password : "").toString();
+    const allUsers = await getAllUsers();
+    const user = allUsers.find((u) => u.username.toLowerCase() === username.toLowerCase());
+    if (!user) {
+      res.status(404).json({ error: "User profile not found" });
+      return;
+    }
+    const userPassword = user.password || "Pints!";
+    if (!verifyPassword(password, userPassword)) {
+      res.status(401).json({ error: "Incorrect password. Please re-enter your password to confirm account deletion." });
+      return;
+    }
   }
 
   const deleted = await deleteUser(username);
@@ -2683,6 +3877,9 @@ app.post("/api/pubs/:id/messages", async (req, res) => {
     const { id } = req.params;
     const user = (req.body.user || req.body.username || "").toString().trim();
     const text = (req.body.text || "").toString().trim();
+    const targetUsernames: string[] | undefined = Array.isArray(req.body.targetUsernames)
+      ? req.body.targetUsernames.map((u: any) => String(u).trim()).filter(Boolean)
+      : undefined;
 
     if (!user || !text) {
       res.status(400).json({ error: "User and message text are required." });
@@ -2699,21 +3896,28 @@ app.post("/api/pubs/:id/messages", async (req, res) => {
 
     const saved = await savePubChatMessage(msg);
 
-    // Dispatch notifications to all other members of the pub
+    // Dispatch notifications. A beacon with an explicit invite list notifies exactly
+    // those people - which may include friends who aren't pub members, since the
+    // point is inviting people out, not just alerting the existing roster. Anything
+    // else (an ordinary chat message, or a beacon with no explicit list) notifies the
+    // whole pub roster same as before.
     try {
       const allPubsList = await getAllPubs();
       const pub = allPubsList.find((p) => p.id === id);
-      if (pub && pub.members && pub.members.length > 0) {
+      if (pub) {
         const isBeacon = text.includes("BEACONS ARE LIT") || text.toLowerCase().includes("beacon");
         const userLower = user.toLowerCase().trim();
-        const recipients = pub.members.filter((m) => m.toLowerCase().trim() !== userLower);
+        const recipients = isBeacon && targetUsernames && targetUsernames.length > 0
+          ? targetUsernames.filter((u) => u.toLowerCase().trim() !== userLower)
+          : (pub.members || []).filter((m) => m.toLowerCase().trim() !== userLower);
 
+        const safePubName = escapeHtml(pub.name);
         for (const recipient of recipients) {
           if (isBeacon) {
-            let locationStr = `in <strong>${pub.name}</strong>`;
+            let locationStr = `in <strong>${safePubName}</strong>`;
             const match = text.match(/BEACONS ARE LIT AT ([^!]+)!/i) || text.match(/lit the beacons at ([^!]+) for/i);
             if (match && match[1]) {
-              locationStr = `at <strong>${match[1].trim()}</strong> (${pub.name})`;
+              locationStr = `at <strong>${escapeHtml(match[1].trim())}</strong> (${safePubName})`;
             }
             await createAndDispatchNotification({
               idPrefix: "notif-beacon",
@@ -2723,12 +3927,12 @@ app.post("/api/pubs/:id/messages", async (req, res) => {
               type: "beacon",
             });
           } else {
-            const snippet = text.length > 40 ? text.substring(0, 40) + "..." : text;
+            const snippet = escapeHtml(text.length > 40 ? text.substring(0, 40) + "..." : text);
             await createAndDispatchNotification({
               idPrefix: "notif-pub-chat",
               user: user,
               targetUser: recipient,
-              text: `posted in <strong>${pub.name}</strong>: "${snippet}" 💬`,
+              text: `posted in <strong>${safePubName}</strong>: "${snippet}" 💬`,
               type: "chat",
             });
           }
@@ -2745,23 +3949,128 @@ app.post("/api/pubs/:id/messages", async (req, res) => {
   }
 });
 
+// POST Toggle a reaction on a pub chat message - built for beacon calls ("I'm coming
+// by horse/car/bus/...!") but works on any message in the thread.
+app.post("/api/pubs/:pubId/messages/:messageId/react", async (req, res) => {
+  const { pubId, messageId } = req.params;
+  const username = (req.body.username || req.body.user || "").toString().trim();
+  const { reactionType } = req.body;
+
+  if (!username) {
+    res.status(400).json({ error: "Username is required to react" });
+    return;
+  }
+  if (!reactionType) {
+    res.status(400).json({ error: "Reaction type is required" });
+    return;
+  }
+
+  const messages = await getPubMessages(pubId);
+  const msg = messages.find((m) => m.id === messageId);
+  if (!msg) {
+    res.status(404).json({ error: "Message not found" });
+    return;
+  }
+
+  if (!msg.reactions || typeof msg.reactions !== "object") msg.reactions = {};
+  if (!msg.reactions[reactionType] || !Array.isArray(msg.reactions[reactionType])) {
+    msg.reactions[reactionType] = [];
+  }
+
+  const idx = msg.reactions[reactionType].indexOf(username);
+  const isAdding = idx === -1;
+  if (isAdding) {
+    msg.reactions[reactionType].push(username);
+  } else {
+    msg.reactions[reactionType].splice(idx, 1);
+  }
+
+  const saved = await savePubChatMessage(msg);
+
+  // Let the message's author know someone's responding, same as reacting to a post -
+  // but only on adding a reaction, not removing one (nobody needs a notification for
+  // "they changed their mind").
+  if (isAdding && msg.user.toLowerCase().trim() !== username.toLowerCase().trim()) {
+    try {
+      const allPubsList = await getAllPubs();
+      const pub = allPubsList.find((p) => p.id === pubId);
+      const safePubName = escapeHtml(pub?.name || "the Pub");
+      const travelLabels: Record<string, string> = {
+        horse: "🐎 Horse",
+        car: "🚗 Driving",
+        bus: "🚌 Bus",
+        taxi: "🚕 Taxi",
+        bike: "🚲 Bike",
+        running: "🏃 Running",
+        walking: "🚶 Walking",
+        flying: "✈️ Flying",
+        here: "📍 Already Here",
+        cant_make_it: "❌ Can't Make It",
+      };
+      const label = travelLabels[reactionType] || escapeHtml(String(reactionType));
+      const isDecline = reactionType === "cant_make_it";
+      await createAndDispatchNotification({
+        idPrefix: "notif-beacon-react",
+        user: username,
+        targetUser: msg.user,
+        text: isDecline
+          ? `won't make it to your call in <strong>${safePubName}</strong>. ${label}`
+          : `is coming to your call in <strong>${safePubName}</strong>: <strong>${label}</strong>! 🍻`,
+        type: "reaction",
+      });
+    } catch (notifErr) {
+      console.error("Failed to generate beacon reaction notification:", notifErr);
+    }
+  }
+
+  res.json(saved);
+});
+
 // POST Create or Update Pub
 app.post("/api/pubs", async (req, res) => {
-  const { id, name, owner, members, invited, emblem } = req.body;
+  // The client's edit flow sends "pubId" (not "id") on an update - accept both so an
+  // edit actually targets the existing document instead of silently generating a new
+  // one every time (pubId = id || `pub-${Date.now()}` with id always undefined for
+  // an edit request meant every "update" was really creating an orphaned duplicate).
+  const { id, pubId: bodyPubId, name, owner, members, invited, emblem, isPrivate, currentUser } = req.body;
+  const resolvedId = (id || bodyPubId || "").toString().trim() || undefined;
 
   if (!name || !owner) {
     res.status(400).json({ error: "Pub name and owner are required." });
     return;
   }
 
-  const pubId = id || `pub-${Date.now()}`;
+  let existingPub: Pub | undefined;
+  if (resolvedId) {
+    const allPubsList = await getAllPubs();
+    existingPub = allPubsList.find((p) => p.id === resolvedId);
+    if (!existingPub) {
+      res.status(404).json({ error: "Pub not found." });
+      return;
+    }
+    // Only the owner can edit an existing Pub's details.
+    const requester = (currentUser || owner || "").toString().trim();
+    const isOwner = existingPub.owner.toLowerCase().trim() === requester.toLowerCase().trim();
+    if (!isOwner && !isSeymoreBeers(requester)) {
+      res.status(403).json({ error: "Only the Pub's owner can edit its details." });
+      return;
+    }
+  }
+
+  const pubId = resolvedId || `pub-${Date.now()}`;
+  // On an update, any field this request doesn't explicitly include falls back to the
+  // existing Pub's value rather than a bare default - savePub()/setDoc() replaces the
+  // whole document, so previously omitting members/invited/widgets here would have
+  // silently reset a pub's roster and custom widgets on a simple name/emblem edit.
   const pub: Pub = {
     id: pubId,
     name,
-    owner,
-    members: members || [owner],
-    invited: invited || [],
-    emblem: emblem || ""
+    owner: existingPub ? existingPub.owner : owner,
+    members: members || (existingPub ? existingPub.members : [owner]),
+    invited: invited || (existingPub ? existingPub.invited : []),
+    emblem: emblem !== undefined ? emblem : (existingPub ? existingPub.emblem : ""),
+    isPrivate: isPrivate !== undefined ? !!isPrivate : !!existingPub?.isPrivate,
+    ...(existingPub?.widgets ? { widgets: existingPub.widgets } : {}),
   };
 
   const saved = await savePub(pub);
@@ -2773,7 +4082,7 @@ app.post("/api/pubs", async (req, res) => {
         idPrefix: "notif-pub",
         user: owner,
         targetUser: invitee,
-        text: `invited you to join the Pub: "${name}"! 🍻`,
+        text: `invited you to join the Pub: "${escapeHtml(name)}"! 🍻`,
         type: "invite",
       });
     }
@@ -2800,8 +4109,18 @@ app.post("/api/pubs/:id/join", async (req, res) => {
     return;
   }
 
+  const usernameLower = username.toLowerCase().trim();
+  const isAlreadyMember = pub.members.some((m) => m.toLowerCase().trim() === usernameLower);
+  const isInvited = (pub.invited || []).some((u) => u.toLowerCase().trim() === usernameLower);
+
+  // Private pubs can't be joined by just knowing the ID - an actual invite is required.
+  if (pub.isPrivate && !isAlreadyMember && !isInvited) {
+    res.status(403).json({ error: "This Pub is private - you need an invite from the owner to join." });
+    return;
+  }
+
   // Add to members if not already
-  if (!pub.members.includes(username)) {
+  if (!isAlreadyMember) {
     pub.members.push(username);
   }
 
@@ -2819,10 +4138,35 @@ app.post("/api/pubs/:id/join", async (req, res) => {
       idPrefix: `notif-pub-join-${pub.id}-${member.toLowerCase().trim()}`,
       user: username,
       targetUser: member,
-      text: `has entered ${pub.name}! Who's buying the first round? 🍻`,
+      text: `has entered ${escapeHtml(pub.name)}! Who's buying the first round? 🍻`,
     });
   }
 
+  res.json(saved);
+});
+
+// POST Decline Pub Invite - the other half of a pub invite acting like a friend
+// request: accepting is just joining (above), declining removes the invite without
+// ever making the person a member.
+app.post("/api/pubs/:id/decline", async (req, res) => {
+  const { id } = req.params;
+  const username = (req.body.username || req.body.user || "").toString().trim();
+
+  if (!username) {
+    res.status(400).json({ error: "Username is required to decline an invite." });
+    return;
+  }
+
+  const allPubsList = await getAllPubs();
+  const pub = allPubsList.find((p) => p.id === id);
+  if (!pub) {
+    res.status(404).json({ error: "Pub not found" });
+    return;
+  }
+
+  const usernameLower = username.toLowerCase().trim();
+  pub.invited = (pub.invited || []).filter((u) => u.toLowerCase().trim() !== usernameLower);
+  const saved = await savePub(pub);
   res.json(saved);
 });
 
@@ -2855,7 +4199,7 @@ app.post("/api/pubs/:id/invite", async (req, res) => {
         idPrefix: "notif-pub-invite",
         user: sender || pub.owner,
         targetUser: invitee,
-        text: `invited you to join the Pub: "${pub.name}"! 🍻`,
+        text: `invited you to join the Pub: "${escapeHtml(pub.name)}"! 🍻`,
         type: "invite",
       });
     }
@@ -2869,6 +4213,89 @@ app.post("/api/pubs/:id/invite", async (req, res) => {
 });
 
 // POST Leave Pub
+// POST Update a Pub's customizable Awards-tab widgets (any member can customize)
+const VALID_WIDGET_TYPES: PubWidgetType[] = ["beverage-gauge", "abv-gauge", "rating-gauge", "goblin-mode", "dart-matrix"];
+app.post("/api/pubs/:id/widgets", async (req, res) => {
+  const { id } = req.params;
+  const currentUser = (req.body.currentUser || "").toString().trim();
+  const widgetsInput = req.body.widgets;
+
+  if (!currentUser) {
+    res.status(400).json({ error: "currentUser is required." });
+    return;
+  }
+  if (!Array.isArray(widgetsInput)) {
+    res.status(400).json({ error: "widgets must be an array." });
+    return;
+  }
+
+  const allPubsList = await getAllPubs();
+  const pub = allPubsList.find((p) => p.id === id);
+  if (!pub) {
+    res.status(404).json({ error: "Pub not found" });
+    return;
+  }
+
+  const isMember = pub.members.some((m) => m.toLowerCase() === currentUser.toLowerCase());
+  if (!isMember && !isSeymoreBeers(currentUser)) {
+    res.status(403).json({ error: "Only pub members can customize this Pub's widgets." });
+    return;
+  }
+
+  if (widgetsInput.length > 6) {
+    res.status(400).json({ error: "A Pub can have at most 6 widgets." });
+    return;
+  }
+
+  const cleanWidgets: PubWidgetConfig[] = [];
+  for (const w of widgetsInput) {
+    const type = (w?.type || "").toString();
+    if (!VALID_WIDGET_TYPES.includes(type as PubWidgetType)) continue;
+    const label = (w?.label || "").toString().trim().slice(0, 40) || "Custom Widget";
+    const keyword = w?.keyword ? w.keyword.toString().trim().slice(0, 30) : undefined;
+    if (type === "beverage-gauge" && !keyword) continue; // beverage gauge requires a keyword
+    cleanWidgets.push({
+      id: (w?.id || `widget-${Date.now()}-${cleanWidgets.length}`).toString().slice(0, 60),
+      type: type as PubWidgetType,
+      label,
+      ...(keyword ? { keyword } : {}),
+    });
+  }
+
+  pub.widgets = cleanWidgets;
+  const saved = await savePub(pub);
+  res.json(saved);
+});
+
+// POST Update Pub Privacy - owner only, since this controls who can get in
+app.post("/api/pubs/:id/privacy", async (req, res) => {
+  const { id } = req.params;
+  const currentUser = (req.body.currentUser || "").toString().trim();
+  const isPrivate = !!req.body.isPrivate;
+
+  if (!currentUser) {
+    res.status(400).json({ error: "currentUser is required." });
+    return;
+  }
+
+  const allPubsList = await getAllPubs();
+  const pub = allPubsList.find((p) => p.id === id);
+  if (!pub) {
+    res.status(404).json({ error: "Pub not found" });
+    return;
+  }
+
+  const isOwner = pub.owner.toLowerCase().trim() === currentUser.toLowerCase().trim();
+  if (!isOwner && !isSeymoreBeers(currentUser)) {
+    res.status(403).json({ error: "Only the Pub's owner can change its privacy setting." });
+    return;
+  }
+
+  pub.isPrivate = isPrivate;
+  const saved = await savePub(pub);
+  res.json(saved);
+});
+
 app.post("/api/pubs/:id/leave", async (req, res) => {
   const { id } = req.params;
   const username = (req.body.username || req.body.user || "").toString().trim();

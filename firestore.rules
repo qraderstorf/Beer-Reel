@@ -1,23 +1,42 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Standard rules for public beers and users lists
-    match /users/{username} {
-      allow read, write: if true;
-    }
+    // NOTE: server.ts talks to Firestore through the client-side `firebase/firestore`
+    // SDK (not firebase-admin), so whatever is actually deployed for these rules
+    // governs the Express server's reads/writes too, not just direct browser access.
+    //
+    // IMPORTANT: this file is a reference copy - it must be deployed via the Firebase
+    // Console (Firestore > Rules) or `firebase deploy --only firestore:rules` for any
+    // change here to take effect. Editing this file alone does nothing.
+
+    // Live activity feed reads directly from the client (src/App.tsx onSnapshot).
     match /beers/{beerId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Contains plaintext passwords - never expose to direct client reads.
+    match /users/{username} {
+      allow read, write: if false;
     }
     match /notifications/{notificationId} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
     match /pubs/{pubId} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
     match /pub_messages/{messageId} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
     match /fcm_tokens/{tokenId} {
+      allow read, write: if false;
+    }
+
+    // User & content moderation reports (the profile "Block/Report" feature
+    // and the per-post report flag). There's no Firebase Auth in this app, so
+    // this can't be restricted to admin-only at the rules level - GET
+    // /api/reports enforces admin-only access at the server route instead.
+    match /reports/{reportId} {
       allow read, write: if true;
     }
   }

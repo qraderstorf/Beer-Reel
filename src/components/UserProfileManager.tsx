@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Check, Calendar, Sparkles, X, Smile, Trash2, Trophy, Flame, Award, Shield, Heart, ZoomIn, ZoomOut, Pencil } from "lucide-react";
-import { UserProfile, BeerLog, isSeymoreBeers } from "../types";
-import { getMostDrankBeerForUser, compressImage, isImposterLog } from "../utils";
+import { Check, Calendar, Sparkles, X, Smile, Trash2, Trophy, Flame, Award, Shield, Heart, ZoomIn, ZoomOut, Pencil, ArrowLeft, Ban, Flag } from "lucide-react";
+import { UserProfile, BeerLog, ContentReport, isSeymoreBeers } from "../types";
+import { getMostDrankBeerForUser, compressImage, useRetryImage, convertHeicIfNeeded } from "../utils";
 import UserAvatar from "./UserAvatar";
+import FriendsHub from "./FriendsHub";
+import WeeklyRecap from "./WeeklyRecap";
 
 interface UserProfileManagerProps {
   users: UserProfile[];
@@ -12,13 +14,25 @@ interface UserProfileManagerProps {
   onCurrentUserChanged: (username: string) => void;
   onProfileAddedOrUpdated: (profile: UserProfile) => void;
   onProfileDeleted: (username: string) => void;
+  onSelfAccountDeleted: (password: string) => Promise<{ success: boolean; error?: string }>;
   isOpen: boolean;
   onClose: () => void;
   viewingUsername?: string | null;
   clientUseFirestore: boolean;
+  onViewProfileRequested?: (username: string) => void;
+  onBackToMyProfile?: () => void;
 }
 
 const COMMON_EMOJIS = ["🍻", "🍺", "☕", "🍋", "🍊", "🍷", "🍹", "🥂", "🥃", "🍔", "🍕", "😎", "👾", "🦊", "🐼", "🦁", "👑"];
+
+const REPORT_REASONS = [
+  "Spam",
+  "Harassment or bullying",
+  "Fake account / impersonation",
+  "Inappropriate or offensive content",
+  "Underage user",
+  "Other",
+];
 
 function getLocalDateString(dateInput: Date | string | number, timeZone: string): string {
   const d = new Date(dateInput);
@@ -50,6 +64,19 @@ function getDayDifference(dateStr1: string, dateStr2: string): number {
   return Math.round(diffTime / (1000 * 60 * 60 * 24));
 }
 
+function StatChip({ label, value, emoji, colorClass, title }: { label: string; value: string | number; emoji: string; colorClass: string; title?: string }) {
+  const isWordy = typeof value === "string" && value.length > 4;
+  return (
+    <div className={`rounded-xl p-2.5 flex flex-col items-center justify-center text-center border ${colorClass}`} title={title}>
+      <span className="text-[8px] font-bold uppercase tracking-wider opacity-70">{label}</span>
+      <span className={`font-black mt-0.5 flex items-center gap-1 ${isWordy ? "text-[11px] flex-col gap-0" : "text-base"}`}>
+        <span className={isWordy ? "text-base" : ""}>{emoji}</span>
+        <span className="leading-tight">{value}</span>
+      </span>
+    </div>
+  );
+}
+
 export default function UserProfileManager({
   users,
   currentUser,
@@ -57,18 +84,28 @@ export default function UserProfileManager({
   onCurrentUserChanged,
   onProfileAddedOrUpdated,
   onProfileDeleted,
+  onSelfAccountDeleted,
   isOpen,
   onClose,
   viewingUsername,
-  clientUseFirestore
+  clientUseFirestore,
+  onViewProfileRequested,
+  onBackToMyProfile
 }: UserProfileManagerProps) {
+  const [showWeeklyRecap, setShowWeeklyRecap] = useState(false);
+
   // My Profile Edit States
   const [myRealName, setMyRealName] = useState("");
   const [myEmail, setMyEmail] = useState("");
   const [myAvatar, setMyAvatar] = useState("🍻");
   const [myBio, setMyBio] = useState("");
-  const [myPassword, setMyPassword] = useState("Pints!");
+  const [myCurrentPassword, setMyCurrentPassword] = useState("");
+  const [myNewPassword, setMyNewPassword] = useState("");
+  const [regeneratingRecoveryCode, setRegeneratingRecoveryCode] = useState(false);
+  const [recoveryCodeError, setRecoveryCodeError] = useState<string | null>(null);
+  const [newRecoveryCode, setNewRecoveryCode] = useState<string | null>(null);
   const [myPhotoUrl, setMyPhotoUrl] = useState<string | null>(null);
+  const myPhotoPreview = useRetryImage(myPhotoUrl);
   const [myError, setMyError] = useState<string | null>(null);
   const [mySuccess, setMySuccess] = useState(false);
   const [isUpdatingMyProfile, setIsUpdatingMyProfile] = useState(false);
@@ -82,10 +119,12 @@ export default function UserProfileManager({
     avgRating: string;
     favoriteStyle: string;
     totalCheers: number;
-    benderCount: number;
-    longestDrinkingStreak: number;
+    theUsualBeerName: string;
+    theUsualCount: number;
+    goldenHourLabel: string;
+    goldenHourEmoji: string;
+    firstPourCount: number;
     longestDryStreak: number;
-    currentDrinkingStreak: number;
     currentDryStreak: number;
   } | null>(null);
   const [loadingStats, setLoadingStats] = useState(false);
@@ -174,6 +213,25 @@ export default function UserProfileManager({
   const [deleteConfirmUser, setDeleteConfirmUser] = useState<string | null>(null);
   const [confirmInput, setConfirmInput] = useState("");
 
+  // Self-service "delete my account" state
+  const [showSelfDeleteForm, setShowSelfDeleteForm] = useState(false);
+  const [selfDeletePassword, setSelfDeletePassword] = useState("");
+  const [selfDeleteConfirmText, setSelfDeleteConfirmText] = useState("");
+  const [selfDeleteError, setSelfDeleteError] = useState<string | null>(null);
+  const [isDeletingSelf, setIsDeletingSelf] = useState(false);
+
+  const handleSelfDeleteSubmit = async () => {
+    setSelfDeleteError(null);
+    setIsDeletingSelf(true);
+    const result = await onSelfAccountDeleted(selfDeletePassword);
+    setIsDeletingSelf(false);
+    if (!result.success) {
+      setSelfDeleteError(result.error || "Failed to delete your account.");
+    }
+    // On success the app logs the user out and unmounts this modal, so
+    // there's no local state left to clean up here.
+  };
+
   // Determine if we are in "Viewer Capacity" for another user
   const isViewOnly = !!viewingUsername && viewingUsername.toLowerCase() !== currentUser.toLowerCase();
 
@@ -188,6 +246,89 @@ export default function UserProfileManager({
     realName: displayedUsername
   };
 
+  // Block / Unblock the currently-viewed user
+  const [isBlockActionPending, setIsBlockActionPending] = useState(false);
+  const [blockError, setBlockError] = useState<string | null>(null);
+
+  // Report the currently-viewed user
+  const [showReportForm, setShowReportForm] = useState(false);
+  const [reportReason, setReportReason] = useState("");
+  const [reportNote, setReportNote] = useState("");
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [reportSubmitted, setReportSubmitted] = useState(false);
+
+  const myProfile = users.find((u) => u.username === currentUser);
+  const isTargetBlocked = (myProfile?.blockedUsers || []).some(
+    (b) => b.toLowerCase() === targetUser.username.toLowerCase()
+  );
+
+  const handleToggleBlock = async () => {
+    setIsBlockActionPending(true);
+    setBlockError(null);
+    try {
+      const endpoint = isTargetBlocked ? "unblock" : "block";
+      const res = await fetch(`/api/users/${encodeURIComponent(currentUser)}/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetUsername: targetUser.username, currentUser }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not update block status.");
+      (data.users || []).forEach((u: UserProfile) => onProfileAddedOrUpdated(u));
+    } catch (err: any) {
+      setBlockError(err.message || "Something went wrong.");
+    } finally {
+      setIsBlockActionPending(false);
+    }
+  };
+
+  const handleSubmitReport = async () => {
+    if (!reportReason) {
+      setReportError("Please select a reason.");
+      return;
+    }
+    setIsSubmittingReport(true);
+    setReportError(null);
+    try {
+      const res = await fetch("/api/reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reporterUsername: currentUser,
+          targetType: "user",
+          targetId: targetUser.username,
+          targetUsername: targetUser.username,
+          reason: reportReason,
+          note: reportNote.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not submit report.");
+      setReportSubmitted(true);
+      setTimeout(() => {
+        setShowReportForm(false);
+        setReportSubmitted(false);
+        setReportReason("");
+        setReportNote("");
+      }, 1800);
+    } catch (err: any) {
+      setReportError(err.message || "Something went wrong.");
+    } finally {
+      setIsSubmittingReport(false);
+    }
+  };
+
+  // Reset block/report UI state whenever the viewed profile changes
+  useEffect(() => {
+    setShowReportForm(false);
+    setReportReason("");
+    setReportNote("");
+    setReportError(null);
+    setReportSubmitted(false);
+    setBlockError(null);
+  }, [viewingUsername]);
+
   // Sync profile data when current user changes or modal opens
   useEffect(() => {
     if (isOpen && (loadedUsername !== currentUser || !prevOpen)) {
@@ -195,7 +336,10 @@ export default function UserProfileManager({
       if (profile) {
         setMyAvatar(profile.avatar || "🍻");
         setMyBio(profile.bio || "");
-        setMyPassword(profile.password || "Pints!");
+        setMyCurrentPassword("");
+        setMyNewPassword("");
+        setNewRecoveryCode(null);
+        setRecoveryCodeError(null);
         setMyRealName(profile.realName || "");
         setMyEmail(profile.email || "");
         setMyPhotoUrl(profile.photoUrl || null);
@@ -203,8 +347,27 @@ export default function UserProfileManager({
         setIsEditing(false);
       }
     }
+    if (isOpen && !prevOpen) {
+      setShowSelfDeleteForm(false);
+      setSelfDeletePassword("");
+      setSelfDeleteConfirmText("");
+      setSelfDeleteError(null);
+    }
     setPrevOpen(isOpen);
   }, [currentUser, users, isOpen, prevOpen, loadedUsername]);
+
+  // HEIC (the iPhone camera default) doesn't decode via <img> on non-WebKit browsers,
+  // so it needs converting to JPEG before it can be shown in the crop preview at all.
+  const loadFileForCropping = async (file: File) => {
+    const converted = await convertHeicIfNeeded(file);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        setCroppingImageSrc(event.target.result as string);
+      }
+    };
+    reader.readAsDataURL(converted);
+  };
 
   // Handle Edit Profile submission
   const handleEditMyProfileSubmit = async (e: React.FormEvent) => {
@@ -224,19 +387,25 @@ export default function UserProfileManager({
           favoriteStyle: "Other",
           avatar: myAvatar,
           bio: myBio.trim(),
-          password: myPassword,
+          currentPassword: myCurrentPassword,
+          password: myNewPassword.trim() || undefined,
           realName: myRealName.trim() || undefined,
           email: myEmail.trim() || undefined,
-          photoUrl: myPhotoUrl || undefined
+          // Always send an explicit value (never omit the key) - this form always knows
+          // the intended final photo state, including "the user just cleared it," which
+          // an omitted key can't distinguish from "don't touch this field."
+          photoUrl: myPhotoUrl || ""
         }),
       });
 
+      const savedProfile = await response.json();
       if (!response.ok) {
-        throw new Error("Failed to update profile.");
+        throw new Error(savedProfile.error || "Failed to update profile.");
       }
 
-      const savedProfile = await response.json();
       onProfileAddedOrUpdated(savedProfile);
+      setMyCurrentPassword("");
+      setMyNewPassword("");
       setMySuccess(true);
       setTimeout(() => {
         setMySuccess(false);
@@ -246,6 +415,34 @@ export default function UserProfileManager({
       setMyError(err.message || "An error occurred while saving profile changes.");
     } finally {
       setIsUpdatingMyProfile(false);
+    }
+  };
+
+  // Regenerates the self-service password-recovery code (also covers accounts created
+  // before this feature existed and so have never had one). Requires the current
+  // password as proof of identity, same as any other account change on this screen.
+  const handleRegenerateRecoveryCode = async () => {
+    if (!myCurrentPassword) {
+      setRecoveryCodeError("Enter your current password above first, then regenerate.");
+      return;
+    }
+    setRegeneratingRecoveryCode(true);
+    setRecoveryCodeError(null);
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(currentUser)}/recovery-code`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword: myCurrentPassword }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to generate a recovery code.");
+      }
+      setNewRecoveryCode(data.recoveryCode);
+    } catch (err: any) {
+      setRecoveryCodeError(err.message || "Failed to generate a recovery code.");
+    } finally {
+      setRegeneratingRecoveryCode(false);
     }
   };
 
@@ -273,10 +470,12 @@ export default function UserProfileManager({
             avgRating: data.avgRating,
             favoriteStyle: data.favoriteStyle,
             totalCheers: data.totalCheers,
-            benderCount: data.benderCount,
-            longestDrinkingStreak: data.longestDrinkingStreak || 0,
+            theUsualBeerName: data.theUsualBeerName || "",
+            theUsualCount: data.theUsualCount || 0,
+            goldenHourLabel: data.goldenHourLabel || "TBD",
+            goldenHourEmoji: data.goldenHourEmoji || "🕐",
+            firstPourCount: data.firstPourCount || 0,
             longestDryStreak: data.longestDryStreak || 0,
-            currentDrinkingStreak: data.currentDrinkingStreak || 0,
             currentDryStreak: data.currentDryStreak || 0
           });
         }
@@ -299,12 +498,58 @@ export default function UserProfileManager({
     };
   }, [isOpen, displayedUsername, clientUseFirestore]);
 
+  // Admin-only: load open content/user reports when the modal opens
+  const [reports, setReports] = useState<ContentReport[]>([]);
+  const [loadingReports, setLoadingReports] = useState(false);
+  const [resolvingReportId, setResolvingReportId] = useState<string | null>(null);
+  const isAdmin = isSeymoreBeers(currentUser);
+
+  useEffect(() => {
+    if (!isOpen || isViewOnly || !isAdmin) return;
+    let isMounted = true;
+    (async () => {
+      setLoadingReports(true);
+      try {
+        const res = await fetch(`/api/reports?currentUser=${encodeURIComponent(currentUser)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted) setReports(data);
+        }
+      } catch (err) {
+        console.error("Failed to load reports:", err);
+      } finally {
+        if (isMounted) setLoadingReports(false);
+      }
+    })();
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, isViewOnly, isAdmin, currentUser]);
+
+  const handleResolveReport = async (reportId: string) => {
+    setResolvingReportId(reportId);
+    try {
+      const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentUser }),
+      });
+      if (res.ok) {
+        setReports((prev) => prev.map((r) => (r.id === reportId ? { ...r, status: "resolved" } : r)));
+      }
+    } catch (err) {
+      console.error("Failed to resolve report:", err);
+    } finally {
+      setResolvingReportId(null);
+    }
+  };
+
   if (!isOpen) return null;
 
   const showEditForm = !isViewOnly && isEditing;
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 15 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -313,15 +558,25 @@ export default function UserProfileManager({
       >
         {/* Modal Header */}
         <div className="p-5 border-b border-slate-150 flex items-center justify-between bg-slate-50/50">
-          <div className="flex items-center gap-2">
-            <Trophy className="w-4 h-4 text-amber-500 animate-pulse" />
-            <h2 className="text-md font-bold text-slate-800 tracking-tight">
+          <div className="flex items-center gap-2 min-w-0">
+            {isViewOnly ? (
+              <button
+                onClick={onBackToMyProfile}
+                title="Back to my profile"
+                className="p-1 -ml-1 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-all focus:outline-none cursor-pointer shrink-0"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+            ) : (
+              <Trophy className="w-4 h-4 text-amber-500 animate-pulse shrink-0" />
+            )}
+            <h2 className="text-md font-bold text-slate-800 tracking-tight truncate">
               {isViewOnly ? `${targetUser.realName || targetUser.username}'s Profile` : "My Profile & Career Stats"}
             </h2>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-all focus:outline-none cursor-pointer"
+            className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-all focus:outline-none cursor-pointer shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
@@ -339,68 +594,184 @@ export default function UserProfileManager({
           {!showEditForm ? (
             /* VIEW PROFILE (EITHER OTHER USER OR SELF) */
             <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row items-center gap-5 pb-5 border-b border-slate-100">
-                <UserAvatar username={targetUser.username} users={users} className="w-20 h-20 text-3xl border-2 border-amber-500" />
-                <div className="text-center sm:text-left space-y-1 min-w-0 flex-1">
-                  <span className="text-[10px] font-extrabold text-amber-600 uppercase tracking-wider block">
-                    {isViewOnly ? "Pub Member Profile" : "My Pub Profile"}
-                  </span>
-                  <h3 className="text-lg font-black text-slate-800 tracking-tight truncate">
-                    {targetUser.realName || targetUser.username}
-                  </h3>
-                  <span className="text-xs text-slate-400 font-bold block">@{targetUser.username}</span>
-                  <p className="text-xs text-slate-500 italic font-semibold leading-relaxed mt-2">
-                    "{targetUser.bio || "No bio added yet."}"
-                  </p>
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-center sm:justify-start gap-3 pt-2">
-                    <div className="flex items-center justify-center sm:justify-start gap-1 text-[10px] text-slate-400 font-bold uppercase tracking-wider">
-                      <Calendar className="w-3.5 h-3.5 text-slate-300" />
-                      <span>Joined {targetUser.joinedDate}</span>
-                    </div>
+              <div className="flex items-center gap-4 pb-5 border-b border-slate-100">
+                <UserAvatar username={targetUser.username} users={users} className="w-16 h-16 sm:w-20 sm:h-20 text-2xl sm:text-3xl border-2 border-amber-500 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-black text-slate-800 tracking-tight truncate">
+                      {targetUser.realName || targetUser.username}
+                    </h3>
                     {!isViewOnly && (
                       <button
                         onClick={() => setIsEditing(true)}
-                        className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white text-[10px] font-extrabold rounded-lg transition-all shadow-sm flex items-center justify-center gap-1 cursor-pointer"
+                        title="Edit Profile"
+                        className="p-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-all shadow-sm cursor-pointer shrink-0"
                       >
-                        <Pencil className="w-3.5 h-3.5" /> Edit Profile
+                        <Pencil className="w-3.5 h-3.5" />
                       </button>
                     )}
+                  </div>
+                  <span className="text-xs text-slate-400 font-bold block">@{targetUser.username}</span>
+                  <p className="text-xs text-slate-500 italic font-medium leading-snug mt-1.5 line-clamp-2">
+                    "{targetUser.bio || "No bio added yet."}"
+                  </p>
+                  <div className="flex items-center gap-1 text-[9px] text-slate-400 font-bold uppercase tracking-wider mt-1.5">
+                    <Calendar className="w-3 h-3 text-slate-300" />
+                    <span>Joined {targetUser.joinedDate}</span>
                   </div>
                 </div>
               </div>
 
+              {/* Block / Report actions - only shown when looking at someone else's profile */}
+              {isViewOnly && (
+                <div className="space-y-2 -mt-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleToggleBlock}
+                      disabled={isBlockActionPending}
+                      className={`flex items-center gap-1.5 text-[11px] font-bold rounded-lg px-2.5 py-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                        isTargetBlocked
+                          ? "text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
+                          : "text-slate-500 hover:text-red-600 hover:bg-red-50"
+                      }`}
+                    >
+                      <Ban className="w-3.5 h-3.5" />
+                      {isBlockActionPending ? "..." : isTargetBlocked ? "Unblock" : "Block"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowReportForm((v) => !v)}
+                      className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg px-2.5 py-1.5 transition-colors cursor-pointer"
+                    >
+                      <Flag className="w-3.5 h-3.5" />
+                      Report
+                    </button>
+                  </div>
+                  {blockError && <p className="text-red-600 text-[11px] font-semibold">{blockError}</p>}
+                  {isTargetBlocked && (
+                    <p className="text-[11px] text-slate-400 font-medium">
+                      You've blocked @{targetUser.username}. Their pints and comments are hidden from you.
+                    </p>
+                  )}
+
+                  {showReportForm && (
+                    <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs space-y-2.5">
+                      {reportSubmitted ? (
+                        <p className="text-emerald-700 font-bold flex items-center gap-1.5">
+                          <Check className="w-4 h-4" /> Report submitted. Thanks for flagging this.
+                        </p>
+                      ) : (
+                        <>
+                          <p className="text-red-700 font-bold">Report @{targetUser.username}</p>
+                          <div className="space-y-1">
+                            <label htmlFor="report-reason-select" className="text-[9px] text-red-500 font-bold uppercase block">
+                              Reason
+                            </label>
+                            <select
+                              id="report-reason-select"
+                              value={reportReason}
+                              onChange={(e) => setReportReason(e.target.value)}
+                              className="w-full px-2.5 py-1.5 border border-red-200 rounded bg-white text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-red-500"
+                            >
+                              <option value="">Select a reason...</option>
+                              {REPORT_REASONS.map((r) => (
+                                <option key={r} value={r}>{r}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label htmlFor="report-note-input" className="text-[9px] text-red-500 font-bold uppercase block">
+                              Additional details (optional)
+                            </label>
+                            <input
+                              id="report-note-input"
+                              type="text"
+                              placeholder="Anything else we should know?"
+                              value={reportNote}
+                              onChange={(e) => setReportNote(e.target.value)}
+                              className="w-full px-2.5 py-1.5 border border-red-200 rounded bg-white text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-red-500"
+                            />
+                          </div>
+                          {reportError && <p className="text-red-700 font-semibold text-[11px]">{reportError}</p>}
+                          <div className="flex gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isSubmittingReport}
+                              onClick={handleSubmitReport}
+                              className="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
+                            >
+                              {isSubmittingReport ? "Submitting..." : "Submit Report"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setShowReportForm(false)}
+                              className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Weekly Recap trigger */}
+              <button
+                onClick={() => setShowWeeklyRecap(true)}
+                className="w-full flex items-center justify-between gap-2 px-4 py-3 bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-500 hover:to-orange-600 text-slate-950 rounded-2xl shadow-md transition-all cursor-pointer"
+              >
+                <span className="text-sm font-black flex items-center gap-2">
+                  🎉 {isViewOnly ? `${targetUser.realName || targetUser.username}'s Week` : "Your Week"}
+                </span>
+                <span className="text-[10px] font-bold uppercase tracking-wider opacity-70">See Recap →</span>
+              </button>
+
               {/* Stats Section */}
-              <div className="space-y-3">
+              <div className="space-y-2.5">
                 <span className="block text-xs font-bold uppercase tracking-wider text-slate-400">
                   {isViewOnly ? "Career Stats" : "My Career Stats"}
                 </span>
                 {loadingStats || !profileStats ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((idx) => (
-                      <div key={idx} className="bg-slate-50/50 border border-slate-200 rounded-xl p-4 flex flex-col items-center justify-center text-center shadow-inner animate-pulse h-[82px]">
-                        <div className="h-2.5 w-12 bg-slate-200 rounded mb-2"></div>
-                        <div className="h-6 w-8 bg-slate-200 rounded"></div>
-                      </div>
-                    ))}
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-2 gap-2.5">
+                      {[1, 2].map((idx) => (
+                        <div key={idx} className="bg-slate-100 rounded-2xl h-20 animate-pulse" />
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[1, 2, 3, 4, 5, 6].map((idx) => (
+                        <div key={idx} className="bg-slate-100 rounded-xl h-16 animate-pulse" />
+                      ))}
+                    </div>
                   </div>
                 ) : statsError ? (
                   <div className="text-xs text-red-500 font-semibold p-2 bg-red-50 rounded-lg">
                     ⚠️ {statsError}
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Total Pints</span>
-                      <span className="text-2xl font-black text-amber-500 mt-1">{profileStats.totalPints}</span>
+                  <div className="space-y-2.5">
+                    {/* Hero stats */}
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div className="bg-gradient-to-br from-amber-400 to-orange-500 rounded-2xl p-3.5 text-slate-950 shadow-md">
+                        <span className="text-[9px] font-black uppercase tracking-wider text-slate-950/60">Total Pints</span>
+                        <div className="text-2xl sm:text-3xl font-black mt-0.5">🍺 {profileStats.totalPints}</div>
+                      </div>
+                      <div className="bg-gradient-to-br from-amber-300 to-yellow-500 rounded-2xl p-3.5 text-slate-950 shadow-md">
+                        <span className="text-[9px] font-black uppercase tracking-wider text-slate-950/60">Avg Rating</span>
+                        <div className="text-2xl sm:text-3xl font-black mt-0.5">⭐ {profileStats.avgRating}</div>
+                      </div>
                     </div>
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Avg Rating</span>
-                      <span className="text-2xl font-black text-amber-500 mt-1">⭐ {profileStats.avgRating}</span>
-                    </div>
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Beer/Day</span>
-                      <span className="text-2xl font-black text-amber-600 mt-1">
-                        🍺 {(() => {
+
+                    {/* Secondary stats */}
+                    <div className="grid grid-cols-3 gap-2">
+                      <StatChip
+                        label="Beer/Day"
+                        emoji="🍺"
+                        colorClass="bg-amber-50 border-amber-100 text-amber-700"
+                        value={(() => {
                           if (!profileStats || !profileStats.totalPints) return "0.0";
                           const joinedStr = targetUser.joinedDate || new Date().toISOString();
                           const joinedTime = new Date(joinedStr).getTime();
@@ -408,203 +779,275 @@ export default function UserProfileManager({
                           const diffDays = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
                           return (profileStats.totalPints / diffDays).toFixed(1);
                         })()}
-                      </span>
-                    </div>
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Bender Days</span>
-                      <span className="text-2xl font-black text-red-500 mt-1 flex items-center gap-1 animate-pulse">
-                        🚨 {profileStats.benderCount}
-                      </span>
-                    </div>
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Longest Drinking</span>
-                      <span className="text-xl font-black text-amber-600 mt-1 flex items-center gap-1">
-                        🍺 {profileStats.longestDrinkingStreak}d
-                      </span>
-                    </div>
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Current Drinking</span>
-                      <span className="text-xl font-black text-emerald-600 mt-1 flex items-center gap-1">
-                        🔥 {profileStats.currentDrinkingStreak}d
-                      </span>
-                    </div>
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Longest Dry</span>
-                      <span className="text-xl font-black text-sky-500 mt-1 flex items-center gap-1">
-                        🐪 {profileStats.longestDryStreak}d
-                      </span>
-                    </div>
-                    <div className="bg-slate-50/50 border border-slate-200 rounded-xl p-3 flex flex-col items-center justify-center text-center shadow-inner">
-                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Current Dry</span>
-                      <span className="text-xl font-black text-sky-600 mt-1 flex items-center gap-1">
-                        🌵 {profileStats.currentDryStreak}d
-                      </span>
+                      />
+                      <StatChip
+                        label="First Pours"
+                        emoji="🌅"
+                        colorClass="bg-red-50 border-red-100 text-red-600"
+                        value={profileStats.firstPourCount}
+                      />
+                      <StatChip
+                        label="The Usual"
+                        emoji="🔁"
+                        colorClass="bg-orange-50 border-orange-100 text-orange-700"
+                        value={profileStats.theUsualCount > 0 ? `${profileStats.theUsualCount}×` : "—"}
+                        title={profileStats.theUsualBeerName ? `Your usual: ${profileStats.theUsualBeerName}` : undefined}
+                      />
+                      <StatChip
+                        label="Golden Hour"
+                        emoji={profileStats.goldenHourEmoji}
+                        colorClass="bg-emerald-50 border-emerald-100 text-emerald-700"
+                        value={profileStats.goldenHourLabel}
+                      />
+                      <StatChip
+                        label="Longest Dry"
+                        emoji="🏛️"
+                        colorClass="bg-sky-50 border-sky-100 text-sky-700"
+                        value={`${profileStats.longestDryStreak}d`}
+                        title="My Body Is A Temple - your longest streak on record"
+                      />
+                      <StatChip
+                        label="Current Dry"
+                        emoji="🧘"
+                        colorClass="bg-cyan-50 border-cyan-100 text-cyan-700"
+                        value={`${profileStats.currentDryStreak}d`}
+                      />
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* drinking buddies list */}
+              {/* Friends management */}
               {!isViewOnly && (
+                <div className="pt-2">
+                  <FriendsHub
+                    currentUser={currentUser}
+                    users={users}
+                    onProfileAddedOrUpdated={onProfileAddedOrUpdated}
+                    onViewProfileRequested={onViewProfileRequested}
+                  />
+                </div>
+              )}
+
+              {/* Self-service account deletion */}
+              {!isViewOnly && (
+                <div className="space-y-2 pt-2">
+                  <span className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                    Danger Zone
+                  </span>
+                  {!showSelfDeleteForm ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowSelfDeleteForm(true)}
+                      className="flex items-center gap-1.5 text-[11px] font-bold text-red-500 hover:text-red-600 hover:bg-red-50 rounded-lg px-2.5 py-1.5 transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Delete My Account
+                    </button>
+                  ) : (
+                    <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs space-y-3">
+                      <div>
+                        <p className="text-red-700 font-bold">⚠️ Delete your account permanently?</p>
+                        <p className="text-red-600 text-[11px] font-normal leading-relaxed mt-1">
+                          This deletes your profile and every pint you've logged. You'll be removed from
+                          any friends lists. This cannot be undone.
+                        </p>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label htmlFor="self-delete-password" className="text-[9px] text-red-500 font-bold uppercase block">
+                          Enter your password
+                        </label>
+                        <input
+                          id="self-delete-password"
+                          type="password"
+                          placeholder="Your account password"
+                          value={selfDeletePassword}
+                          onChange={(e) => setSelfDeletePassword(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-red-200 rounded bg-white text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-red-500"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label htmlFor="self-delete-confirm" className="text-[9px] text-red-500 font-bold uppercase block">
+                          Type <span className="underline font-extrabold">DELETE</span> to confirm
+                        </label>
+                        <input
+                          id="self-delete-confirm"
+                          type="text"
+                          placeholder="DELETE"
+                          value={selfDeleteConfirmText}
+                          onChange={(e) => setSelfDeleteConfirmText(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-red-200 rounded bg-white text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-red-500"
+                        />
+                      </div>
+
+                      {selfDeleteError && (
+                        <p className="text-red-700 font-semibold text-[11px]">{selfDeleteError}</p>
+                      )}
+
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          disabled={selfDeleteConfirmText !== "DELETE" || !selfDeletePassword || isDeletingSelf}
+                          onClick={handleSelfDeleteSubmit}
+                          className="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
+                        >
+                          {isDeletingSelf ? "Deleting..." : "Permanently Delete"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowSelfDeleteForm(false);
+                            setSelfDeletePassword("");
+                            setSelfDeleteConfirmText("");
+                            setSelfDeleteError(null);
+                          }}
+                          className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Admin-only: full user directory with delete capability */}
+              {!isViewOnly && isSeymoreBeers(currentUser) && (
                 <div className="space-y-3 pt-2">
                   <span className="block text-xs font-bold uppercase tracking-wider text-slate-400">
-                    Pub Members ({users.length})
+                    🔓 Admin: All Users ({users.length})
                   </span>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {users.map((user) => {
-                      const isActive = user.username === currentUser;
-                      
-                      // Lightweight fallback from current active memory logs for the buddies list
-                      const uLogs = logs.filter((l) => l.user.toLowerCase() === user.username.toLowerCase() && !isImposterLog(l));
-                      const bMemberStats = {
-                        totalPints: uLogs.length,
-                        benderCount: (() => {
-                          const days: Record<string, number> = {};
-                          uLogs.forEach((l) => {
-                            const day = l.date.split("T")[0];
-                            days[day] = (days[day] || 0) + 1;
-                          });
-                          return Object.values(days).filter((c) => c >= 4).length;
-                        })()
-                      };
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {users.map((user) => (
+                      <div
+                        key={user.username}
+                        className="p-2.5 rounded-xl border border-slate-200 bg-white flex flex-col gap-2"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <UserAvatar username={user.username} users={users} className="w-8 h-8 border border-slate-200" />
+                          <div className="min-w-0 flex-1">
+                            <span className="font-extrabold text-slate-800 text-xs truncate block">
+                              {user.realName || user.username}
+                            </span>
+                            <span className="text-[10px] text-slate-400 font-semibold truncate block">@{user.username}</span>
+                          </div>
+                          {users.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDeleteConfirmUser(user.username);
+                                setConfirmInput("");
+                              }}
+                              className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors focus:outline-none shrink-0"
+                              title={`Delete ${user.username}'s profile`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
 
-                      return (
+                        {/* Safe Double-Confirmation Area */}
+                        {deleteConfirmUser === user.username && (
+                          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs space-y-2">
+                            <p className="text-red-700 font-bold">⚠️ Confirm Deletion</p>
+                            <p className="text-red-600 text-[11px] font-normal leading-relaxed">
+                              This deletes this profile and all their logged pints permanently.
+                            </p>
+                            <div className="space-y-1">
+                              <label className="text-[9px] text-red-500 font-bold uppercase block">
+                                Type <span className="underline font-extrabold">{user.username}</span> to confirm:
+                              </label>
+                              <div className="flex gap-1.5">
+                                <input
+                                  type="text"
+                                  placeholder={`Type ${user.username}`}
+                                  value={confirmInput}
+                                  onChange={(e) => setConfirmInput(e.target.value)}
+                                  className="w-full px-2 py-1 border border-red-200 rounded bg-white text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-red-500"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={confirmInput !== user.username}
+                                  onClick={async () => {
+                                    await onProfileDeleted(user.username);
+                                    setDeleteConfirmUser(null);
+                                    setConfirmInput("");
+                                  }}
+                                  className="px-2.5 py-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
+                                >
+                                  Delete
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setDeleteConfirmUser(null);
+                                    setConfirmInput("");
+                                  }}
+                                  className="px-2.5 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Admin-only: user & content reports queue */}
+              {!isViewOnly && isAdmin && (
+                <div className="space-y-3 pt-2">
+                  <span className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                    🔓 Admin: Reports ({reports.filter((r) => r.status === "open").length} open)
+                  </span>
+                  {loadingReports ? (
+                    <div className="text-xs text-slate-400 font-semibold">Loading reports...</div>
+                  ) : reports.length === 0 ? (
+                    <div className="text-xs text-slate-400 font-medium p-3 bg-slate-50 rounded-lg">
+                      No reports yet.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {reports.map((report) => (
                         <div
-                          key={user.username}
-                          className={`p-4 rounded-xl border transition-all flex flex-col justify-between group ${
-                            isActive
-                              ? "border-amber-400 bg-amber-50/10"
-                              : "border-slate-200 bg-white hover:border-amber-300"
+                          key={report.id}
+                          className={`p-2.5 rounded-xl border text-xs space-y-1.5 ${
+                            report.status === "open"
+                              ? "border-red-200 bg-red-50"
+                              : "border-slate-200 bg-slate-50 opacity-60"
                           }`}
                         >
-                          <div className="flex items-start gap-3">
-                            <UserAvatar username={user.username} users={users} className="w-10 h-10 border border-slate-200" />
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center justify-between gap-1.5 w-full">
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  <div className="flex flex-col min-w-0">
-                                    <span className="font-extrabold text-slate-800 text-sm truncate">
-                                      {user.realName || user.username}
-                                    </span>
-                                    {user.realName && (
-                                      <span className="text-[10px] text-slate-400 font-semibold truncate leading-none mt-0.5">
-                                        @{user.username}
-                                      </span>
-                                    )}
-                                  </div>
-                                  {isActive && (
-                                    <span className="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded text-[8px] font-bold uppercase shrink-0">
-                                      YOU
-                                    </span>
-                                  )}
-                                </div>
-                                
-                                {isSeymoreBeers(currentUser) && users.length > 1 ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setDeleteConfirmUser(user.username);
-                                      setConfirmInput("");
-                                    }}
-                                    className="text-slate-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-md transition-colors focus:outline-none shrink-0"
-                                    title={`Delete ${user.username}'s profile`}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                ) : isActive ? (
-                                  <span className="text-[9px] text-amber-600 font-extrabold uppercase tracking-wider select-none shrink-0">
-                                    Active
-                                  </span>
-                                ) : null}
-                              </div>
-
-                              {/* Bio & Beer stats */}
-                              <div className="mt-1.5 space-y-1.5">
-                                <p className="text-xs text-slate-500 line-clamp-1 italic font-medium leading-relaxed">
-                                  {user.bio || "No bio added yet."}
-                                </p>
-                                <div className="flex flex-wrap gap-1">
-                                  <span className="text-[9px] text-amber-600 font-bold bg-amber-50 border border-amber-200/50 px-1.5 py-0.5 rounded">
-                                    🍺 {bMemberStats.totalPints} pint{bMemberStats.totalPints !== 1 ? "s" : ""}
-                                  </span>
-                                  <span className="text-[9px] text-red-600 font-bold bg-red-50 border border-red-200/50 px-1.5 py-0.5 rounded">
-                                    🚨 {bMemberStats.benderCount} bender{bMemberStats.benderCount !== 1 ? "s" : ""}
-                                  </span>
-                                  <span className="text-[9px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-200/50 px-1.5 py-0.5 rounded">
-                                    📊 {(() => {
-                                      if (uLogs.length === 0) return "0.0";
-                                      const joinedStr = user.joinedDate || new Date().toISOString();
-                                      const joinedTime = new Date(joinedStr).getTime();
-                                      const diffMs = Date.now() - joinedTime;
-                                      const diffDays = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
-                                      return (uLogs.length / diffDays).toFixed(1);
-                                    })()}/day
-                                  </span>
-                                </div>
-                              </div>
-
-                              {/* Safe Double-Confirmation Area */}
-                              {deleteConfirmUser === user.username && (
-                                <div 
-                                  className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-xs space-y-2"
-                                >
-                                  <p className="text-red-700 font-bold">
-                                    ⚠️ Confirm Deletion
-                                  </p>
-                                  <p className="text-red-600 text-[11px] font-normal leading-relaxed">
-                                    This deletes this profile and all their logged pints permanently.
-                                  </p>
-                                  <div className="space-y-1">
-                                    <label className="text-[9px] text-red-500 font-bold uppercase block">
-                                      Type <span className="underline font-extrabold">{user.username}</span> to confirm:
-                                    </label>
-                                    <div className="flex gap-1.5">
-                                      <input
-                                        type="text"
-                                        placeholder={`Type ${user.username}`}
-                                        value={confirmInput}
-                                        onChange={(e) => setConfirmInput(e.target.value)}
-                                        className="w-full px-2 py-1 border border-red-200 rounded bg-white text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-red-500"
-                                      />
-                                      <button
-                                        type="button"
-                                        disabled={confirmInput !== user.username}
-                                        onClick={async () => {
-                                          await onProfileDeleted(user.username);
-                                          setDeleteConfirmUser(null);
-                                          setConfirmInput("");
-                                        }}
-                                        className="px-2.5 py-1 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
-                                      >
-                                        Delete
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setDeleteConfirmUser(null);
-                                          setConfirmInput("");
-                                        }}
-                                        className="px-2.5 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded cursor-pointer transition-colors text-[11px] shrink-0"
-                                      >
-                                        Cancel
-                                      </button>
-                                    </div>
-                                  </div>
-                                </div>
-                              )}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <span className="font-extrabold text-slate-800 block truncate">
+                                {report.targetType === "user" ? "User" : report.targetType === "post" ? "Post" : "Comment"}: @{report.targetUsername || report.targetId}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-semibold block">
+                                Reported by @{report.reporterUsername} &middot; {new Date(report.date).toLocaleString()}
+                              </span>
                             </div>
+                            {report.status === "open" && (
+                              <button
+                                type="button"
+                                disabled={resolvingReportId === report.id}
+                                onClick={() => handleResolveReport(report.id)}
+                                className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white font-bold rounded cursor-pointer transition-colors text-[10px] shrink-0"
+                              >
+                                {resolvingReportId === report.id ? "..." : "Mark Resolved"}
+                              </button>
+                            )}
                           </div>
-
-                          <div className="mt-3 pt-2 border-t border-slate-100 flex items-center text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                            <div className="flex items-center gap-1">
-                              <Calendar className="w-3.5 h-3.5 text-slate-300" />
-                              <span>Joined {user.joinedDate}</span>
-                            </div>
-                          </div>
+                          <p className="text-slate-700 font-semibold">{report.reason}</p>
+                          {report.note && <p className="text-slate-500 italic">"{report.note}"</p>}
                         </div>
-                      );
-                    })}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -637,26 +1080,21 @@ export default function UserProfileManager({
                         onDrop={(e) => {
                           e.preventDefault();
                           if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                            const file = e.dataTransfer.files[0];
-                            const reader = new FileReader();
-                            reader.onload = (event) => {
-                              if (event.target?.result) {
-                                setCroppingImageSrc(event.target.result as string);
-                              }
-                            };
-                            reader.readAsDataURL(file);
+                            loadFileForCropping(e.dataTransfer.files[0]);
                           }
                         }}
                         onClick={() => document.getElementById("profile-photo-input")?.click()}
                         className="border-2 border-dashed border-slate-200 hover:border-amber-500 rounded-xl p-4 text-center cursor-pointer transition-all bg-white hover:bg-amber-50/10 flex flex-col items-center justify-center gap-1.5 shadow-sm"
                       >
-                        {myPhotoUrl ? (
+                        {myPhotoUrl && !myPhotoPreview.failed ? (
                           <div className="relative w-16 h-16 group">
                             <img
-                              src={myPhotoUrl}
+                              key={myPhotoPreview.retryKey}
+                              src={myPhotoPreview.src}
                               alt="Profile"
                               className="w-16 h-16 rounded-full object-cover border border-amber-500 shadow-sm"
                               referrerPolicy="no-referrer"
+                              onError={myPhotoPreview.onError}
                             />
                             <div className="absolute inset-0 bg-black/45 rounded-full opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                               <span className="text-[9px] text-white font-bold uppercase">Change</span>
@@ -681,14 +1119,7 @@ export default function UserProfileManager({
                         className="hidden"
                         onChange={(e) => {
                           if (e.target.files && e.target.files[0]) {
-                            const file = e.target.files[0];
-                            const reader = new FileReader();
-                            reader.onload = (event) => {
-                              if (event.target?.result) {
-                                setCroppingImageSrc(event.target.result as string);
-                              }
-                            };
-                            reader.readAsDataURL(file);
+                            loadFileForCropping(e.target.files[0]);
                           }
                         }}
                       />
@@ -752,7 +1183,7 @@ export default function UserProfileManager({
                       <input
                         id="my-email-input"
                         type="email"
-                        placeholder="quin@beerreal.com"
+                        placeholder="quin@beerreel.com"
                         value={myEmail}
                         onChange={(e) => setMyEmail(e.target.value)}
                         className="w-full px-3 py-2 border border-slate-200 bg-white rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 text-slate-800 transition-all"
@@ -774,19 +1205,67 @@ export default function UserProfileManager({
                       />
                     </div>
 
-                    {/* Password */}
+                    {/* Current password - required to confirm it's really you before saving anything */}
                     <div>
-                      <label htmlFor="my-password-input" className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                        Profile Password
+                      <label htmlFor="my-current-password-input" className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                        Current Password
                       </label>
                       <input
-                        id="my-password-input"
+                        id="my-current-password-input"
                         type="password"
-                        placeholder="Default is Pints!"
-                        value={myPassword}
-                        onChange={(e) => setMyPassword(e.target.value)}
+                        placeholder="Required to save changes"
+                        autoComplete="current-password"
+                        required
+                        value={myCurrentPassword}
+                        onChange={(e) => setMyCurrentPassword(e.target.value)}
                         className="w-full px-3 py-2 border border-slate-200 bg-white rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 text-slate-800 transition-all"
                       />
+                    </div>
+
+                    {/* New password - optional, leave blank to keep the current one */}
+                    <div>
+                      <label htmlFor="my-new-password-input" className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                        New Password
+                      </label>
+                      <input
+                        id="my-new-password-input"
+                        type="password"
+                        placeholder="Leave blank to keep current password"
+                        autoComplete="new-password"
+                        value={myNewPassword}
+                        onChange={(e) => setMyNewPassword(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-200 bg-white rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 text-slate-800 transition-all"
+                      />
+                    </div>
+
+                    {/* Recovery code - the self-service password-recovery mechanism (no email
+                        infra exists to send a reset link through). Regenerating requires the
+                        current password field above and immediately invalidates any older code. */}
+                    <div className="border border-slate-200 rounded-lg p-3 bg-slate-50/60 space-y-2">
+                      <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Recovery Code</p>
+                      <p className="text-[11px] text-slate-500 leading-relaxed font-medium">
+                        Used to reset your password if you forget it. Enter your current password above, then generate one - it's shown only once.
+                      </p>
+                      {newRecoveryCode ? (
+                        <div className="flex items-center justify-between gap-2 bg-white border-2 border-dashed border-amber-400 rounded-lg px-3 py-2">
+                          <span className="font-mono text-sm font-extrabold tracking-wider text-slate-800 select-all">
+                            {newRecoveryCode}
+                          </span>
+                          <span className="text-[9px] font-bold text-amber-600 uppercase shrink-0">Save this now</span>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleRegenerateRecoveryCode}
+                          disabled={regeneratingRecoveryCode}
+                          className="text-xs font-bold text-amber-600 hover:text-amber-700 hover:underline disabled:opacity-50"
+                        >
+                          {regeneratingRecoveryCode ? "Generating..." : "Generate a new recovery code"}
+                        </button>
+                      )}
+                      {recoveryCodeError && (
+                        <p className="text-red-600 text-[11px] font-semibold">{recoveryCodeError}</p>
+                      )}
                     </div>
                   </div>
 
@@ -814,7 +1293,15 @@ export default function UserProfileManager({
         </div>
 
         {/* Modal Footer */}
-        <div className="p-4 border-t border-slate-150 bg-slate-50/50 flex justify-end">
+        <div className="p-4 border-t border-slate-150 bg-slate-50/50 flex items-center justify-between">
+          <a
+            href="/privacy.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] text-slate-400 hover:text-amber-600 font-semibold hover:underline"
+          >
+            Privacy Policy
+          </a>
           <button
             onClick={onClose}
             className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-lg transition-all shadow-sm focus:outline-none cursor-pointer"
@@ -945,6 +1432,14 @@ export default function UserProfileManager({
           </div>
         )}
       </AnimatePresence>
+
+      {showWeeklyRecap && (
+        <WeeklyRecap
+          username={displayedUsername}
+          isOwnRecap={!isViewOnly}
+          onClose={() => setShowWeeklyRecap(false)}
+        />
+      )}
     </div>
   );
 }

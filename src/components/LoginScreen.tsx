@@ -1,8 +1,8 @@
 import React, { useState, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Lock, User, Mail, PlusCircle, Smile, Sparkles, AlertCircle, Eye, EyeOff, Beer, ZoomIn, ZoomOut } from "lucide-react";
+import { Lock, User, Mail, PlusCircle, Smile, Sparkles, AlertCircle, Eye, EyeOff, Beer, ZoomIn, ZoomOut, KeyRound, Copy, Check, ShieldCheck } from "lucide-react";
 import { UserProfile } from "../types";
-import { compressImage } from "../utils";
+import { compressImage, convertHeicIfNeeded } from "../utils";
 import Logo from "./Logo";
 
 interface LoginScreenProps {
@@ -31,6 +31,21 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
   const [newBio, setNewBio] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newPhotoUrl, setNewPhotoUrl] = useState<string | null>(null);
+
+  // Recovery-code modal state - shown once right after a successful signup (this app
+  // has no email infra, so the recovery code is the only self-service account-recovery
+  // path, and it can never be shown again after this).
+  const [recoveryCodeToShow, setRecoveryCodeToShow] = useState<string | null>(null);
+  const [pendingLoginAfterModal, setPendingLoginAfterModal] = useState<{ username: string; profile: UserProfile } | null>(null);
+  const [copiedRecoveryCode, setCopiedRecoveryCode] = useState(false);
+
+  // Forgot-password flow state
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [fpUsername, setFpUsername] = useState("");
+  const [fpRecoveryCode, setFpRecoveryCode] = useState("");
+  const [fpNewPassword, setFpNewPassword] = useState("");
+  const [fpLoading, setFpLoading] = useState(false);
+  const [fpError, setFpError] = useState<string | null>(null);
 
   // Photo Cropper States for Signup
   const [croppingImageSrc, setCroppingImageSrc] = useState<string | null>(null);
@@ -77,6 +92,19 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
         y: touch.clientY - dragStart.current.y
       });
     }
+  };
+
+  // HEIC (the iPhone camera default) doesn't decode via <img> on non-WebKit browsers,
+  // so it needs converting to JPEG before it can be shown in the crop preview at all.
+  const loadFileForCropping = async (file: File) => {
+    const converted = await convertHeicIfNeeded(file);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        setCroppingImageSrc(event.target.result as string);
+      }
+    };
+    reader.readAsDataURL(converted);
   };
 
   const handleApplyCrop = () => {
@@ -153,8 +181,8 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
       setError("Please specify a password.");
       return;
     }
-    if (!newPhotoUrl) {
-      setError("Please upload a profile picture. A photo is required to sign up.");
+    if (newPassword.length < 4) {
+      setError("Password must be at least 4 characters.");
       return;
     }
 
@@ -170,15 +198,8 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
         throw new Error("Username already taken. Please choose a different name.");
       }
 
-      // Verify if email already exists if provided
-      if (newEmail.trim()) {
-        const duplicateEmail = users.some(
-          (u) => u.email && u.email.toLowerCase() === newEmail.trim().toLowerCase()
-        );
-        if (duplicateEmail) {
-          throw new Error("This email address is already associated with another account.");
-        }
-      }
+      // Email duplicate check happens server-side - the bulk user list this client
+      // holds no longer includes other people's email addresses to check against.
 
       const res = await fetch("/api/users", {
         method: "POST",
@@ -200,13 +221,83 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
         throw new Error(data.error || "Registration failed");
       }
 
-      // Automatically log them in after registration
-      onProfileCreated(data);
-      onLoginSuccess(data.username);
+      const { recoveryCode, ...profile } = data;
+      if (recoveryCode) {
+        // Hold off on logging them in until they've acknowledged the recovery code -
+        // it's shown exactly once and never recoverable again after this screen closes.
+        setPendingLoginAfterModal({ username: profile.username, profile });
+        setRecoveryCodeToShow(recoveryCode);
+      } else {
+        onProfileCreated(profile);
+        onLoginSuccess(profile.username);
+      }
     } catch (err: any) {
       setError(err.message || "Could not register profile.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleAcknowledgeRecoveryCode = () => {
+    if (pendingLoginAfterModal) {
+      onProfileCreated(pendingLoginAfterModal.profile);
+      onLoginSuccess(pendingLoginAfterModal.username);
+    }
+    setRecoveryCodeToShow(null);
+    setPendingLoginAfterModal(null);
+    setCopiedRecoveryCode(false);
+  };
+
+  const handleCopyRecoveryCode = async (code: string) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedRecoveryCode(true);
+      setTimeout(() => setCopiedRecoveryCode(false), 2000);
+    } catch {
+      // Clipboard API can be unavailable (permissions, insecure context) - the code is
+      // still visible on-screen to copy manually, so this is a soft failure.
+    }
+  };
+
+  const handleForgotPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fpUsername.trim() || !fpRecoveryCode.trim() || !fpNewPassword) {
+      setFpError("Fill in your username, recovery code, and a new password.");
+      return;
+    }
+    if (fpNewPassword.length < 4) {
+      setFpError("Password must be at least 4 characters.");
+      return;
+    }
+
+    setFpLoading(true);
+    setFpError(null);
+
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(fpUsername.trim())}/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recoveryCode: fpRecoveryCode.trim(), newPassword: fpNewPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Could not reset password");
+      }
+
+      // The recovery code rotates on every successful reset - show the new one, same
+      // as at signup, since the old one just got consumed.
+      setShowForgotPassword(false);
+      setSelectedUser(fpUsername.trim());
+      setPassword("");
+      setFpUsername("");
+      setFpRecoveryCode("");
+      setFpNewPassword("");
+      setRecoveryCodeToShow(data.recoveryCode);
+      setPendingLoginAfterModal(null);
+    } catch (err: any) {
+      setFpError(err.message || "Could not reset password.");
+    } finally {
+      setFpLoading(false);
     }
   };
 
@@ -328,6 +419,18 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                   <p className="mt-1 text-[10px] text-slate-400 leading-relaxed font-medium">
                     💡 For existing accounts, try entering <span className="font-bold text-slate-600">Pints!</span>
                   </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowForgotPassword(true);
+                      setFpUsername(selectedUser);
+                      setFpError(null);
+                      setError(null);
+                    }}
+                    className="mt-1.5 text-[11px] font-bold text-amber-600 hover:text-amber-700 hover:underline"
+                  >
+                    Forgot password?
+                  </button>
                 </div>
 
                 <div>
@@ -353,7 +456,7 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
               >
                 <div>
                   <label className="block text-xs font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
-                    Your Real Name
+                    Your Real Name (Optional)
                   </label>
                   <div className="relative">
                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -366,7 +469,6 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                       onChange={(e) => setNewRealName(e.target.value)}
                       placeholder="e.g. John Doe"
                       className="block w-full pl-10 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 placeholder-slate-400 transition-all"
-                      required
                     />
                   </div>
                 </div>
@@ -384,11 +486,11 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                       maxLength={15}
                       value={newUsername}
                       onChange={(e) => {
-                        // strip spaces, allow only letters/numbers/underscores
-                        const cleanVal = e.target.value.replace(/[^a-zA-Z0-9_\-\s]/g, "");
+                        // No spaces - @mentions elsewhere only match letters/numbers/underscore/hyphen
+                        const cleanVal = e.target.value.replace(/[^a-zA-Z0-9_-]/g, "");
                         setNewUsername(cleanVal);
                       }}
-                      placeholder="e.g. Seymore Beers"
+                      placeholder="e.g. SeymoreBeers"
                       className="block w-full pl-10 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 placeholder-slate-400 transition-all"
                     />
                   </div>
@@ -406,7 +508,7 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                       type="email"
                       value={newEmail}
                       onChange={(e) => setNewEmail(e.target.value)}
-                      placeholder="e.g. quin@beerreal.com"
+                      placeholder="e.g. quin@beerreel.com"
                       className="block w-full pl-10 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 placeholder-slate-400 transition-all"
                     />
                   </div>
@@ -431,7 +533,7 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
 
                 <div>
                   <label className="block text-xs font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
-                    Profile Picture (Required)
+                    Profile Picture (Optional)
                   </label>
                   <div className="space-y-2">
                     <div
@@ -439,14 +541,7 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                       onDrop={(e) => {
                         e.preventDefault();
                         if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                          const file = e.dataTransfer.files[0];
-                          const reader = new FileReader();
-                          reader.onload = (event) => {
-                            if (event.target?.result) {
-                              setCroppingImageSrc(event.target.result as string);
-                            }
-                          };
-                          reader.readAsDataURL(file);
+                          loadFileForCropping(e.dataTransfer.files[0]);
                         }
                       }}
                       onClick={() => document.getElementById("register-photo-input")?.click()}
@@ -473,6 +568,7 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                             <span className="text-amber-600 font-bold">Drag & drop</span> or click to upload
                           </p>
                           <p className="text-[9px] text-slate-400">PNG, JPG up to 5MB (with Cropping)</p>
+                          <p className="text-[9px] text-slate-400">Skip this and your emoji avatar will be used instead</p>
                         </>
                       )}
                     </div>
@@ -483,14 +579,7 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                       className="hidden"
                       onChange={(e) => {
                         if (e.target.files && e.target.files[0]) {
-                          const file = e.target.files[0];
-                          const reader = new FileReader();
-                          reader.onload = (event) => {
-                            if (event.target?.result) {
-                              setCroppingImageSrc(event.target.result as string);
-                            }
-                          };
-                          reader.readAsDataURL(file);
+                          loadFileForCropping(e.target.files[0]);
                         }
                       }}
                     />
@@ -530,9 +619,10 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                     </div>
                     <input
                       type={showPassword ? "text" : "password"}
+                      minLength={4}
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
-                      placeholder="Create a password"
+                      placeholder="Create a password (min. 4 characters)"
                       className="block w-full pl-10 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 placeholder-slate-400 transition-all"
                     />
                     <button
@@ -561,6 +651,12 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
             )}
           </AnimatePresence>
         </div>
+
+        <p className="mt-6 text-center text-[11px] text-slate-400 font-semibold">
+          <a href="/privacy.html" target="_blank" rel="noopener noreferrer" className="hover:text-amber-600 hover:underline">
+            Privacy Policy
+          </a>
+        </p>
       </div>
 
       {/* Cropping Modal Overlay */}
@@ -680,6 +776,155 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                   Apply Crop 🍻
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Forgot Password Modal */}
+      <AnimatePresence>
+        {showForgotPassword && (
+          <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[60] flex flex-col items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4 text-left"
+            >
+              <div className="text-center space-y-1">
+                <KeyRound className="w-6 h-6 text-amber-500 mx-auto" />
+                <h3 className="text-sm font-extrabold text-slate-800 dark:text-slate-100 tracking-tight">
+                  Reset Your Password
+                </h3>
+                <p className="text-[10px] text-slate-400 font-semibold leading-normal">
+                  Enter the recovery code you saved when you created your account.
+                </p>
+              </div>
+
+              <AnimatePresence>
+                {fpError && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className="bg-red-50 border border-red-200 rounded-xl p-2.5 flex items-start gap-2 text-red-700 text-xs"
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 text-red-500 mt-0.5" />
+                    <p className="leading-relaxed">{fpError}</p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <form onSubmit={handleForgotPasswordSubmit} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    value={fpUsername}
+                    onChange={(e) => setFpUsername(e.target.value)}
+                    placeholder="Your username"
+                    className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 placeholder-slate-400 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
+                    Recovery Code
+                  </label>
+                  <input
+                    type="text"
+                    value={fpRecoveryCode}
+                    onChange={(e) => setFpRecoveryCode(e.target.value.toUpperCase())}
+                    placeholder="XXXX-XXXX-XXXX"
+                    className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 placeholder-slate-400 transition-all"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
+                    New Password
+                  </label>
+                  <input
+                    type="password"
+                    minLength={4}
+                    value={fpNewPassword}
+                    onChange={(e) => setFpNewPassword(e.target.value)}
+                    placeholder="New password (min. 4 characters)"
+                    className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 placeholder-slate-400 transition-all"
+                  />
+                </div>
+
+                <p className="text-[10px] text-slate-400 leading-relaxed font-medium">
+                  No recovery code saved? There's no email recovery for this app yet - reach out to whoever set up your account for help.
+                </p>
+
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowForgotPassword(false);
+                      setFpError(null);
+                    }}
+                    className="py-2 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={fpLoading}
+                    className="py-2 px-4 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl transition-all cursor-pointer shadow-sm shadow-amber-500/10 disabled:opacity-50"
+                  >
+                    {fpLoading ? "Resetting..." : "Reset Password"}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Recovery Code Modal - shown once, at signup or after a reset. Cannot be reopened. */}
+      <AnimatePresence>
+        {recoveryCodeToShow && (
+          <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[70] flex flex-col items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-6 max-w-sm w-full space-y-4 text-center"
+            >
+              <ShieldCheck className="w-8 h-8 text-amber-500 mx-auto" />
+              <div className="space-y-1">
+                <h3 className="text-sm font-extrabold text-slate-800 dark:text-slate-100 tracking-tight">
+                  Save Your Recovery Code
+                </h3>
+                <p className="text-[11px] text-slate-500 leading-relaxed font-medium">
+                  This is the only way to reset your password if you forget it - there's no email recovery. It's shown{" "}
+                  <span className="font-bold text-slate-700 dark:text-slate-300">only this once</span>. Screenshot it or write it down now.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 bg-slate-50 dark:bg-slate-950 border-2 border-dashed border-amber-400 rounded-xl px-3 py-3">
+                <span className="font-mono text-base font-extrabold tracking-wider text-slate-800 dark:text-slate-100 select-all">
+                  {recoveryCodeToShow}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleCopyRecoveryCode(recoveryCodeToShow)}
+                  className="shrink-0 p-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-amber-600 transition-colors"
+                  aria-label="Copy recovery code"
+                >
+                  {copiedRecoveryCode ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleAcknowledgeRecoveryCode}
+                className="w-full py-2.5 px-4 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl transition-all cursor-pointer shadow-sm shadow-amber-500/10"
+              >
+                I've saved it - Continue 🍻
+              </button>
             </motion.div>
           </div>
         )}

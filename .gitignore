@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local data dumps / caches - never commit real user data.
+# Firestore is the source of truth; these are local file fallbacks/exports only.
+user_profiles.json
+beer_logs.json
+notifications.json
+fcm_tokens.json
+pubs.json

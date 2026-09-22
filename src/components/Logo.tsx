@@ -97,7 +97,7 @@ export default function Logo({ size = "md", showText = true, className = "", onC
 
       {showText && (
         <span className={`${textSizes[size]} font-black tracking-tight text-slate-900 dark:text-white leading-none flex items-center gap-0.5 whitespace-nowrap`}>
-          Beer<span className="text-amber-500">Real</span>
+          Beer<span className="text-amber-500">Reel</span>
           <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse ml-0.5" />
         </span>
       )}

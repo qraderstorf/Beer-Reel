@@ -1,6 +1,15 @@
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
+/* This app forces dark mode unconditionally (see App.tsx - .dark is always
+   added to <html>, no light mode exists). Without this, Tailwind v4's
+   `dark:` variant defaults to a `prefers-color-scheme` media query, so any
+   `dark:` class in the codebase only applied on devices whose OS happened
+   to prefer dark - everyone else silently got the light-mode fallback
+   colors on an otherwise all-dark app. This ties `dark:` to the class that's
+   actually always present instead. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
@@ -22,6 +31,31 @@
 }
 .top-safe-header {
   top: env(safe-area-inset-top, 0px);
+}
+
+/* Thin, unobtrusive scrollbar for horizontally/vertically scrollable strips
+   (reaction rows, chat, roster chips, etc). Referenced across components as
+   "custom-scrollbar" but was never actually defined - browsers just fell
+   back to the default chunky scrollbar. iOS Safari already auto-hides
+   overlay scrollbars on touch scroll, so this mostly matters for desktop
+   and Android Chrome. */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  height: 5px;
+  width: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 163, 184, 0.35);
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(148, 163, 184, 0.55);
 }
 
 /* Base style resets and scrollbar styles for a polished feeling */
@@ -161,6 +195,58 @@ body {
   color: #fca5a5 !important;
 }
 
+.dark .bg-orange-50 {
+  background-color: #271607 !important;
+  border-color: #7c2d12 !important;
+}
+
+.dark .text-orange-700 {
+  color: #fb923c !important;
+}
+
+.dark .border-orange-100 {
+  border-color: #7c2d12 !important;
+}
+
+.dark .bg-emerald-50 {
+  background-color: #0a2318 !important;
+  border-color: #065f46 !important;
+}
+
+.dark .text-emerald-700 {
+  color: #34d399 !important;
+}
+
+.dark .border-emerald-100 {
+  border-color: #065f46 !important;
+}
+
+.dark .bg-sky-50 {
+  background-color: #0a1f2e !important;
+  border-color: #075985 !important;
+}
+
+.dark .text-sky-700 {
+  color: #38bdf8 !important;
+}
+
+.dark .border-sky-100 {
+  border-color: #075985 !important;
+}
+
+.dark .bg-cyan-50 {
+  background-color: #082226 !important;
+  border-color: #155e63 !important;
+}
+
+.dark .text-cyan-700 {
+  color: #22d3ee !important;
+}
+
+.dark .border-cyan-100 {
+  border-color: #155e63 !important;
+}
+
 /* Make sure the custom dot or lines in recharts align with dark mode */
 .dark .recharts-cartesian-grid-horizontal line,
 .dark .recharts-cartesian-grid-vertical line {
@@ -184,6 +270,50 @@ body {
 
 .dark .bg-slate-100\/50 {
   background-color: rgba(32, 43, 66, 0.5) !important;
+}
+
+/* Treatment for a post that's picked up 3+ FOMO Alert reactions - the whole card
+   gives a woozy little drift and blur, like it's too good to sit still, with a
+   warm amber/rose glow that pulses instead of a hard flash. Badge gets a matching
+   shimmer to call it out. */
+@keyframes fomo-alert-drift {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+    filter: blur(0px);
+    box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.35), 0 0 14px rgba(244, 63, 94, 0.25);
+  }
+  20% {
+    transform: translate3d(-1.5px, 1px, 0) rotate(-0.35deg);
+    filter: blur(0.6px);
+  }
+  40% {
+    transform: translate3d(1.5px, -1px, 0) rotate(0.3deg);
+    filter: blur(0px);
+    box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.4), 0 0 18px rgba(249, 115, 22, 0.3);
+  }
+  60% {
+    transform: translate3d(-1px, -0.5px, 0) rotate(-0.25deg);
+    filter: blur(0.7px);
+  }
+  80% {
+    transform: translate3d(1px, 0.5px, 0) rotate(0.2deg);
+    filter: blur(0px);
+    box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.35), 0 0 14px rgba(244, 63, 94, 0.25);
+  }
+}
+.fomo-alert-card {
+  animation: fomo-alert-drift 2.4s ease-in-out infinite;
+  border-color: #fb7185;
+}
+
+@keyframes fomo-alert-badge-shimmer {
+  0%, 100% { background-position: 0% 50%; transform: scale(1); }
+  50% { background-position: 100% 50%; transform: scale(1.06); }
+}
+.fomo-alert-badge {
+  animation: fomo-alert-badge-shimmer 1.6s ease-in-out infinite;
+  background-size: 200% 100%;
+  background-image: linear-gradient(90deg, #f43f5e 0%, #f97316 50%, #f43f5e 100%);
 }
 
 /* Custom highly-polished comment styles */
