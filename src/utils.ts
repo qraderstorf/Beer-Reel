@@ -58,11 +58,15 @@ export function isImposterLog(log: BeerLog): boolean {
   return Array.isArray(dislikes) && dislikes.length >= 3;
 }
 
-// "House Draft" is normalizeBeerName()'s fallback for a check-in that never had a
-// beer name filled in at all - not a real preference, so it shouldn't win "favorite
-// beer"/"most-logged beer" stats just because it's the most common non-answer.
+// normalizeBeerName()'s two "didn't really say" fallbacks: "House Draft" for a blank
+// name, "House Lager" for junk/generic input ("beer", "bad", "unnamed pint", trolling).
+// Neither is a real preference, so they shouldn't win "favorite beer"/"most-logged
+// beer" stats just for being the most common non-answer. Other "House ___" names
+// (House Hazy IPA, House Wine, ...) DO carry real signal - a style or brand match -
+// and stay counted.
+const UNSPECIFIED_BEER_NAMES = new Set(["house draft", "house lager"]);
 export function isUnspecifiedBeerName(name: string | undefined): boolean {
-  return (name || "").trim().toLowerCase() === "house draft";
+  return UNSPECIFIED_BEER_NAMES.has((name || "").trim().toLowerCase());
 }
 
 export function calculateUserStats(logs: BeerLog[], username?: string): UserStatsResult {
