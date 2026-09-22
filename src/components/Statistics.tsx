@@ -32,7 +32,7 @@ import {
   Cell
 } from "recharts";
 import { BeerLog, UserProfile, TimeFilter, Pub } from "../types";
-import { getMostDrankBeerForUser, isImposterLog } from "../utils";
+import { getMostDrankBeerForUser, isImposterLog, isUnspecifiedBeerName } from "../utils";
 import UserAvatar from "./UserAvatar";
 
 interface StatisticsProps {
@@ -564,9 +564,11 @@ export default function Statistics({
     const totalAbv = abvLogs.reduce((acc, curr) => acc + curr.abv, 0);
     const avgAbv = abvLogs.length > 0 ? parseFloat((totalAbv / abvLogs.length).toFixed(1)) : 0;
 
-    // Top Beer
+    // Top Beer (excludes "House Draft" - the placeholder name for a check-in
+    // that never had a beer name filled in, not a real favorite)
     const beerCounts: Record<string, number> = {};
     filteredLogs.forEach((log) => {
+      if (isUnspecifiedBeerName(log.beerName)) return;
       beerCounts[log.beerName] = (beerCounts[log.beerName] || 0) + 1;
     });
     let topBeer = "N/A";

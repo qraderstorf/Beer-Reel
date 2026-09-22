@@ -20,7 +20,7 @@ import {
   Legend
 } from "recharts";
 import { Pub, UserProfile, BeerLog, PubChatMessage, PubWidgetConfig } from "../types";
-import { getMostDrankBeerForUser, isImposterLog, useRetryImage } from "../utils";
+import { getMostDrankBeerForUser, isImposterLog, isUnspecifiedBeerName, useRetryImage } from "../utils";
 import UserAvatar from "./UserAvatar";
 
 function isEmblemUrl(str: string | undefined): boolean {
@@ -1159,10 +1159,14 @@ export default function PubHub({
           const bName = log.beerName.trim();
           if (bName) {
             uniqueBeersSet.add(bName.toLowerCase());
-            beerCounts[bName] = (beerCounts[bName] || 0) + 1;
-            if (beerCounts[bName] > topBeerCount) {
-              topBeerCount = beerCounts[bName];
-              topBeerName = bName;
+            // "House Draft" (never filled in a beer name) shouldn't be able to win
+            // Most Loyal just for being the most common non-answer.
+            if (!isUnspecifiedBeerName(bName)) {
+              beerCounts[bName] = (beerCounts[bName] || 0) + 1;
+              if (beerCounts[bName] > topBeerCount) {
+                topBeerCount = beerCounts[bName];
+                topBeerName = bName;
+              }
             }
           }
         }

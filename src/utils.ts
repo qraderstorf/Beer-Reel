@@ -58,6 +58,13 @@ export function isImposterLog(log: BeerLog): boolean {
   return Array.isArray(dislikes) && dislikes.length >= 3;
 }
 
+// "House Draft" is normalizeBeerName()'s fallback for a check-in that never had a
+// beer name filled in at all - not a real preference, so it shouldn't win "favorite
+// beer"/"most-logged beer" stats just because it's the most common non-answer.
+export function isUnspecifiedBeerName(name: string | undefined): boolean {
+  return (name || "").trim().toLowerCase() === "house draft";
+}
+
 export function calculateUserStats(logs: BeerLog[], username?: string): UserStatsResult {
   const validLogs = logs.filter((l) => !isImposterLog(l));
   const userLogs = username
@@ -91,7 +98,7 @@ export function calculateUserStats(logs: BeerLog[], username?: string): UserStat
   const beerCounts: Record<string, number> = {};
   userLogs.forEach((l) => {
     const name = l.beerName.trim();
-    if (name) {
+    if (name && !isUnspecifiedBeerName(name)) {
       beerCounts[name] = (beerCounts[name] || 0) + 1;
     }
   });

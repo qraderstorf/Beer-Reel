@@ -5,7 +5,7 @@ import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { BeerLog, UserProfile, AppNotification, Pub, PubChatMessage, ContentReport, PubWidgetConfig, PubWidgetType } from "./src/types";
 import { normalizeBeerName } from "./src/data/beerCatalog";
-import { isImposterLog } from "./src/utils";
+import { isImposterLog, isUnspecifiedBeerName } from "./src/utils";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, query, orderBy, where, writeBatch, limit, onSnapshot, runTransaction } from "firebase/firestore";
 import { getStorage, ref, uploadString, getDownloadURL } from "firebase/storage";
@@ -1286,11 +1286,13 @@ async function recalculateAndCacheUserStats(username: string): Promise<any> {
   const currentZone = mostRecentLog ? zoneFor(mostRecentLog) : DEFAULT_TIMEZONE;
 
   // "The Usual" - your single most-repeated beer, a little personality fact
-  // rather than a raw activity count.
+  // rather than a raw activity count. Excludes "House Draft" (a check-in that
+  // never had a beer name filled in) - that's not a preference, it's an absence
+  // of one, and shouldn't be able to win just for being the most common non-answer.
   const beerNameCounts: Record<string, number> = {};
   userLogs.forEach((l) => {
     const name = (l.beerName || "").trim();
-    if (!name) return;
+    if (!name || isUnspecifiedBeerName(name)) return;
     beerNameCounts[name] = (beerNameCounts[name] || 0) + 1;
   });
   let theUsualBeerName = "";
@@ -2516,11 +2518,11 @@ app.get("/api/users/:username/weekly-recap", async (req, res) => {
 
     const postsThisWeek = myLogsThisWeek.length;
 
-    // Top beer this week
+    // Top beer this week (excludes "House Draft" - see recalculateAndCacheUserStats)
     const beerCounts: Record<string, number> = {};
     myLogsThisWeek.forEach((l) => {
       const name = (l.beerName || "").trim();
-      if (name) beerCounts[name] = (beerCounts[name] || 0) + 1;
+      if (name && !isUnspecifiedBeerName(name)) beerCounts[name] = (beerCounts[name] || 0) + 1;
     });
     let topBeer: { name: string; count: number } | null = null;
     Object.entries(beerCounts).forEach(([name, count]) => {
