@@ -177,32 +177,35 @@ export default function UserProfileManager({
     }
   };
 
-  const handleApplyCrop = () => {
+  // Applying a crop saves it immediately - no separate trip to the form's Save
+  // button needed for what's usually the only thing someone came here to change.
+  const handleApplyCrop = async () => {
     if (!cropImgRef.current) return;
     const imgElement = cropImgRef.current;
-    
+
     const canvas = document.createElement("canvas");
     canvas.width = 256;
     canvas.height = 256;
     const ctx = canvas.getContext("2d");
     if (ctx) {
       ctx.clearRect(0, 0, 256, 256);
-      
+
       // S maps from the 160px screen crop zone to 256px high-res canvas output
       const S = 256 / 160;
-      
+
       const drawW = editorImgSize.width * cropZoom * S;
       const drawH = editorImgSize.height * cropZoom * S;
-      
+
       const drawX = 128 + (cropPan.x * S) - (drawW / 2);
       const drawY = 128 + (cropPan.y * S) - (drawH / 2);
-      
+
       ctx.drawImage(imgElement, drawX, drawY, drawW, drawH);
-      
+
       try {
         const croppedBase64 = canvas.toDataURL("image/jpeg", 0.85);
         setMyPhotoUrl(croppedBase64);
         setCroppingImageSrc(null);
+        await persistProfile({ photoUrl: croppedBase64 });
       } catch (err) {
         console.error("Canvas crop extraction failed:", err);
       }
@@ -369,12 +372,18 @@ export default function UserProfileManager({
     reader.readAsDataURL(converted);
   };
 
-  // Handle Edit Profile submission
-  const handleEditMyProfileSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Core save call, shared by the full form submit and by quick one-tap saves (like
+  // applying a cropped photo) that shouldn't need a trip through the whole form.
+  // `photoUrl` and `newPassword` can be passed explicitly so a caller that just
+  // changed one of those doesn't have to wait for state to re-render first; anything
+  // else always saves from the form's current field values.
+  const persistProfile = async (overrides?: { photoUrl?: string | null; newPassword?: string }) => {
     setIsUpdatingMyProfile(true);
     setMyError(null);
     setMySuccess(false);
+
+    const newPassword = overrides?.newPassword !== undefined ? overrides.newPassword : myNewPassword;
+    const resolvedPhotoUrl = overrides?.photoUrl !== undefined ? overrides.photoUrl : myPhotoUrl;
 
     try {
       const response = await fetch("/api/users", {
@@ -387,14 +396,16 @@ export default function UserProfileManager({
           favoriteStyle: "Other",
           avatar: myAvatar,
           bio: myBio.trim(),
-          currentPassword: myCurrentPassword,
-          password: myNewPassword.trim() || undefined,
+          // Only sent (and only required server-side) when actually setting a new
+          // password - routine edits below no longer need it re-entered at all.
+          currentPassword: newPassword.trim() ? myCurrentPassword : undefined,
+          password: newPassword.trim() || undefined,
           realName: myRealName.trim() || undefined,
           email: myEmail.trim() || undefined,
           // Always send an explicit value (never omit the key) - this form always knows
           // the intended final photo state, including "the user just cleared it," which
           // an omitted key can't distinguish from "don't touch this field."
-          photoUrl: myPhotoUrl || ""
+          photoUrl: resolvedPhotoUrl || ""
         }),
       });
 
@@ -410,12 +421,24 @@ export default function UserProfileManager({
       setTimeout(() => {
         setMySuccess(false);
         setIsEditing(false);
-      }, 1500);
+      }, 1200);
+      return true;
     } catch (err: any) {
       setMyError(err.message || "An error occurred while saving profile changes.");
+      return false;
     } finally {
       setIsUpdatingMyProfile(false);
     }
+  };
+
+  // Handle Edit Profile form submission
+  const handleEditMyProfileSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (myNewPassword.trim() && !myCurrentPassword.trim()) {
+      setMyError("Enter your current password to set a new one.");
+      return;
+    }
+    await persistProfile();
   };
 
   // Regenerates the self-service password-recovery code (also covers accounts created
@@ -1126,7 +1149,10 @@ export default function UserProfileManager({
                       {myPhotoUrl && (
                         <button
                           type="button"
-                          onClick={() => setMyPhotoUrl(null)}
+                          onClick={async () => {
+                            setMyPhotoUrl(null);
+                            await persistProfile({ photoUrl: null });
+                          }}
                           className="text-[10px] text-red-500 hover:text-red-600 font-bold uppercase tracking-wider block hover:underline"
                         >
                           Remove Photo
@@ -1205,24 +1231,10 @@ export default function UserProfileManager({
                       />
                     </div>
 
-                    {/* Current password - required to confirm it's really you before saving anything */}
-                    <div>
-                      <label htmlFor="my-current-password-input" className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                        Current Password
-                      </label>
-                      <input
-                        id="my-current-password-input"
-                        type="password"
-                        placeholder="Required to save changes"
-                        autoComplete="current-password"
-                        required
-                        value={myCurrentPassword}
-                        onChange={(e) => setMyCurrentPassword(e.target.value)}
-                        className="w-full px-3 py-2 border border-slate-200 bg-white rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 text-slate-800 transition-all"
-                      />
-                    </div>
-
-                    {/* New password - optional, leave blank to keep the current one */}
+                    {/* New password - optional, leave blank to keep the current one. Everything
+                        else on this form saves with no password needed at all now; this is the
+                        one field that still asks for proof of identity, since getting it wrong
+                        could lock the real owner out. */}
                     <div>
                       <label htmlFor="my-new-password-input" className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
                         New Password
@@ -1234,6 +1246,24 @@ export default function UserProfileManager({
                         autoComplete="new-password"
                         value={myNewPassword}
                         onChange={(e) => setMyNewPassword(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-200 bg-white rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 text-slate-800 transition-all"
+                      />
+                    </div>
+
+                    {/* Current password - not required for routine edits above; only checked
+                        server-side when actually setting a new password. Also used to
+                        generate a recovery code below. */}
+                    <div>
+                      <label htmlFor="my-current-password-input" className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                        Current Password
+                      </label>
+                      <input
+                        id="my-current-password-input"
+                        type="password"
+                        placeholder="Only needed to set a new password or generate a recovery code"
+                        autoComplete="current-password"
+                        value={myCurrentPassword}
+                        onChange={(e) => setMyCurrentPassword(e.target.value)}
                         className="w-full px-3 py-2 border border-slate-200 bg-white rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 text-slate-800 transition-all"
                       />
                     </div>
@@ -1293,7 +1323,7 @@ export default function UserProfileManager({
         </div>
 
         {/* Modal Footer */}
-        <div className="p-4 border-t border-slate-150 bg-slate-50/50 flex items-center justify-between">
+        <div className="p-4 border-t border-slate-150 bg-slate-50/50 flex items-center justify-center">
           <a
             href="/privacy.html"
             target="_blank"
@@ -1302,12 +1332,6 @@ export default function UserProfileManager({
           >
             Privacy Policy
           </a>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-lg transition-all shadow-sm focus:outline-none cursor-pointer"
-          >
-            Done
-          </button>
         </div>
       </motion.div>
 

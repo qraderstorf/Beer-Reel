@@ -3306,14 +3306,14 @@ app.post("/api/users", async (req, res) => {
     return;
   }
 
-  // Require proof of identity before touching an EXISTING account. This endpoint used
-  // to silently overwrite any account's profile - including its password - given
-  // nothing but its username, which is public everywhere in the app. New account
-  // creation is unaffected since there's nothing to authenticate against yet.
-  if (existingUser) {
+  // Require proof of identity before an EXISTING account's PASSWORD changes - getting
+  // this wrong could lock the real owner out or hand the account to someone else, so
+  // it stays gated even though routine profile edits (name/bio/avatar/photo/email)
+  // below no longer are.
+  if (existingUser && password) {
     const storedPassword = existingUser.password || "Pints!";
     if (!verifyPassword((currentPassword || "").toString(), storedPassword)) {
-      res.status(401).json({ error: "Incorrect current password. Re-enter your current password to save changes." });
+      res.status(401).json({ error: "Incorrect current password. Re-enter your current password to change it." });
       return;
     }
   }
