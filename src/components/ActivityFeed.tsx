@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
-import { Star, MessageSquare, Flame, Trash2, Heart, Search, Filter, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, Pin, X, Flag, MapPin, Globe, Users as UsersIcon } from "lucide-react";
-import { BeerLog, UserProfile, isSeymoreBeers, Pub } from "../types";
+import { Star, MessageSquare, Flame, Trash2, Heart, Search, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, X, Flag, MapPin, Globe, Users as UsersIcon } from "lucide-react";
+import { BeerLog, UserProfile, isSeymoreBeers } from "../types";
 import { useRetryImage } from "../utils";
 import UserAvatar from "./UserAvatar";
 import MentionDropdown from "./MentionDropdown";
@@ -30,17 +30,12 @@ interface ActivityFeedProps {
   logs: BeerLog[];
   users: UserProfile[];
   currentUser: string;
-  pubs: Pub[];
-  selectedPubId: string;
-  onPubSelect: (pubId: string) => void;
   selectedUserFilter?: string;
   onUserFilterChange?: (user: string) => void;
   searchTerm?: string;
   onSearchTermChange?: (term: string) => void;
   feedScope?: "everyone" | "friends";
   onFeedScopeChange?: (scope: "everyone" | "friends") => void;
-  pinnedPubId?: string;
-  onPinPub?: (pubId: string) => void;
   onCheersToggled: (id: string) => void;
   onReactionToggled?: (id: string, reactionType: string) => void;
   onLogDeleted: (id: string) => void;
@@ -435,17 +430,12 @@ export default function ActivityFeed({
   logs,
   users,
   currentUser,
-  pubs,
-  selectedPubId,
-  onPubSelect,
   selectedUserFilter,
   onUserFilterChange,
   searchTerm: propSearchTerm,
   onSearchTermChange,
   feedScope = "everyone",
   onFeedScopeChange,
-  pinnedPubId,
-  onPinPub,
   onCheersToggled,
   onReactionToggled,
   onLogDeleted,
@@ -1025,42 +1015,6 @@ export default function ActivityFeed({
                 title="Clear search"
               >
                 <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-          
-          {/* Pub Filter (Global or Specific Pub) */}
-          <div className="relative shrink-0 w-36 sm:w-48 flex items-center gap-1">
-            <div className="relative flex-1 min-w-0">
-              <select
-                value={selectedPubId === "all" || !selectedPubId ? "global" : selectedPubId}
-                onChange={(e) => onPubSelect(e.target.value)}
-                className="w-full pl-2.5 pr-7 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800/80 rounded-lg text-[11px] font-bold text-slate-600 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-500/10 focus:border-amber-500 transition-all cursor-pointer appearance-none shadow-sm truncate"
-              >
-                <option value="global">🌍 Global Feed</option>
-                {pubs.filter(p => p.members.includes(currentUser)).map((p) => {
-                  const isImg = p.emblem && (p.emblem.startsWith("http://") || p.emblem.startsWith("https://") || p.emblem.startsWith("/") || p.emblem.startsWith("data:image"));
-                  const displayEmblem = p.emblem ? (isImg ? "🖼️" : p.emblem) : "🏠";
-                  return (
-                    <option key={p.id} value={p.id}>
-                      {displayEmblem} {p.name}
-                    </option>
-                  );
-                })}
-              </select>
-              <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2 text-slate-400 dark:text-slate-500">
-                <Filter className="w-3 h-3" />
-              </div>
-            </div>
-            {onPinPub && pinnedPubId !== (selectedPubId || "global") && (
-              <button
-                type="button"
-                id="pin-pub-feed-button"
-                onClick={() => onPinPub(selectedPubId || "global")}
-                title="Pin as default view to start"
-                className="p-1.5 rounded-lg border transition-all shrink-0 bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100"
-              >
-                <Pin className="w-3.5 h-3.5" />
               </button>
             )}
           </div>

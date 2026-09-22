@@ -59,9 +59,11 @@ export default function App() {
     return stored === "friends" ? "friends" : "everyone";
   });
 
+  // The Live Feed no longer has its own Pub filter (removed for simplicity - Pub Hub
+  // is the place for pub-specific activity now), so this only tracks the filters that
+  // still live in the feed's own search bar: a specific user, or a search term.
   const isFilterActive =
     selectedUserFilter !== "all" ||
-    (selectedPubId !== "global" && selectedPubId !== "all" && selectedPubId !== "") ||
     searchTerm.trim() !== "";
   const [isQuickLogOpen, setIsQuickLogOpen] = useState(false);
   const [editLogTarget, setEditLogTarget] = useState<BeerLog | null>(null);
@@ -1034,17 +1036,10 @@ export default function App() {
         constraints.push(where("user", "==", selectedUserFilter));
       }
 
-      if (selectedPubId && selectedPubId !== "global" && selectedPubId !== "all") {
-        constraints.push(where("pubId", "==", selectedPubId));
-      }
-
       if (!clientUseFirestore || !db || searchTerm.trim()) {
         try {
           const params = new URLSearchParams({ limit: "10" });
           if (selectedUserFilter !== "all") params.append("user", selectedUserFilter);
-          if (selectedPubId && selectedPubId !== "global" && selectedPubId !== "all") {
-            params.append("pubId", selectedPubId);
-          }
           if (searchTerm.trim()) {
             params.append("search", searchTerm.trim());
           }
@@ -1066,7 +1061,7 @@ export default function App() {
       }
 
       try {
-        console.log(`[Firestore Scoped Query] Fetching database-scoped query for filters: user=${selectedUserFilter}, pubId=${selectedPubId}`);
+        console.log(`[Firestore Scoped Query] Fetching database-scoped query for filters: user=${selectedUserFilter}`);
         const q = query(
           collection(db, "beers"),
           ...constraints,
@@ -1111,7 +1106,6 @@ export default function App() {
     };
   }, [
     selectedUserFilter,
-    selectedPubId,
     searchTerm,
     clientUseFirestore,
     isAuthenticated,
@@ -1136,18 +1130,12 @@ export default function App() {
     if (selectedUserFilter !== "all") {
       constraints.push(where("user", "==", selectedUserFilter));
     }
-    if (selectedPubId && selectedPubId !== "global" && selectedPubId !== "all") {
-      constraints.push(where("pubId", "==", selectedPubId));
-    }
 
     if (!clientUseFirestore || !db || searchTerm.trim()) {
       try {
         const offset = filteredBeers.length;
         const params = new URLSearchParams({ limit: "10", offset: offset.toString() });
         if (selectedUserFilter !== "all") params.append("user", selectedUserFilter);
-        if (selectedPubId && selectedPubId !== "global" && selectedPubId !== "all") {
-          params.append("pubId", selectedPubId);
-        }
         if (searchTerm.trim()) {
           params.append("search", searchTerm.trim());
         }
@@ -2016,17 +2004,12 @@ export default function App() {
                   logs={applyFriendsFilter(applyBlockFilter(isFilterActive ? filteredBeers : logs))}
                   users={users}
                   currentUser={currentUser}
-                  pubs={pubs}
-                  selectedPubId={selectedPubId}
-                  onPubSelect={setSelectedPubId}
                   selectedUserFilter={selectedUserFilter}
                   onUserFilterChange={setSelectedUserFilter}
                   feedScope={feedScope}
                   onFeedScopeChange={handleFeedScopeChange}
                   searchTerm={searchTerm}
                   onSearchTermChange={setSearchTerm}
-                  pinnedPubId={pinnedPubId}
-                  onPinPub={handlePinPub}
                   onCheersToggled={handleCheersToggled}
                   onReactionToggled={handleReactionToggled}
                   onLogDeleted={handleLogDeleted}
