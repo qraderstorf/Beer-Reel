@@ -121,6 +121,16 @@ const BEACON_TRAVEL_REACTIONS: { key: string; emoji: string; label: string }[] =
   { key: "cant_make_it", emoji: "❌", label: "Can't Make It" },
 ];
 
+// Renders a chat message as one big standalone emoji instead of a normal text
+// bubble - covers both the beacon "how are you getting here" picker below and
+// anyone just typing a bare emoji into chat.
+const EMOJI_ONLY_RE = /^[\p{Extended_Pictographic}‍️\s]+$/u;
+function isEmojiOnlyText(text: string | undefined): boolean {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return false;
+  return EMOJI_ONLY_RE.test(trimmed);
+}
+
 function PubChatSection({
   pubId,
   pubName,
@@ -136,36 +146,6 @@ function PubChatSection({
   const [sending, setSending] = useState(false);
   const [openPickerMsgId, setOpenPickerMsgId] = useState<string | null>(null);
   const chatContainerRef = React.useRef<HTMLDivElement | null>(null);
-
-  const handleToggleMessageReaction = async (messageId: string, reactionKey: string) => {
-    setOpenPickerMsgId(null);
-    // Optimistic update so it feels instant, same as the beer-post reaction picker.
-    setMessages((prev) =>
-      prev.map((m) => {
-        if (m.id !== messageId) return m;
-        const reactions = { ...(m.reactions || {}) };
-        const list = reactions[reactionKey] ? [...reactions[reactionKey]] : [];
-        const idx = list.indexOf(currentUser);
-        if (idx === -1) list.push(currentUser);
-        else list.splice(idx, 1);
-        reactions[reactionKey] = list;
-        return { ...m, reactions };
-      })
-    );
-    try {
-      const res = await fetch(`/api/pubs/${encodeURIComponent(pubId)}/messages/${encodeURIComponent(messageId)}/react`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: currentUser, reactionType: reactionKey })
-      });
-      if (res.ok) {
-        const updated: PubChatMessage = await res.json();
-        setMessages((prev) => prev.map((m) => (m.id === messageId ? updated : m)));
-      }
-    } catch (err) {
-      console.error("Failed to toggle message reaction:", err);
-    }
-  };
 
   const fetchMessages = async () => {
     if (!pubId) return;
@@ -231,6 +211,13 @@ function PubChatSection({
     }
   };
 
+  // Sends a beacon travel-emoji pick as its own big standalone chat message,
+  // rather than a reaction tucked under the original beacon call.
+  const handleSendEmojiReply = (emoji: string) => {
+    setOpenPickerMsgId(null);
+    handleSendMessage(undefined, emoji);
+  };
+
   return (
     <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs p-4 sm:p-5 space-y-4">
       {/* Chat Header */}
@@ -263,7 +250,6 @@ function PubChatSection({
             const isOwner = msg.user.toLowerCase() === pubOwner.toLowerCase();
             const timeStr = msg.date ? new Date(msg.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
             const isBeaconMsg = msg.text?.includes("BEACONS ARE LIT");
-            const activeReactions = BEACON_TRAVEL_REACTIONS.filter((r) => (msg.reactions?.[r.key]?.length || 0) > 0);
 
             return (
               <div
@@ -290,67 +276,50 @@ function PubChatSection({
                     <span className="text-[9px] text-slate-500">{timeStr}</span>
                   </div>
 
-                  <div
-                    className={`px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-2xl text-xs sm:text-sm font-semibold leading-relaxed break-words shadow-xs ${
-                      isMe
-                        ? "bg-amber-500 text-slate-950 rounded-tr-none"
-                        : "bg-slate-800/90 text-slate-100 border border-slate-700/80 rounded-tl-none"
-                    }`}
-                  >
-                    {msg.text}
-                  </div>
-
-                  {isBeaconMsg && (
-                    <div className={`flex flex-wrap items-center gap-1 ${isMe ? "justify-end" : "justify-start"}`}>
-                      {activeReactions.map((r) => {
-                        const reactors = msg.reactions?.[r.key] || [];
-                        const reacted = reactors.includes(currentUser);
-                        return (
-                          <button
-                            key={r.key}
-                            type="button"
-                            onClick={() => handleToggleMessageReaction(msg.id, r.key)}
-                            title={`${r.label}: ${reactors.join(", ")}`}
-                            className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 border transition-all cursor-pointer ${
-                              reacted
-                                ? "bg-amber-500/20 border-amber-500 text-amber-300"
-                                : "bg-slate-800/60 border-slate-700 text-slate-300 hover:border-slate-600"
-                            }`}
-                          >
-                            <span>{r.emoji}</span>
-                            <span>{reactors.length}</span>
-                          </button>
-                        );
-                      })}
-                      <button
-                        type="button"
-                        onClick={() => setOpenPickerMsgId(openPickerMsgId === msg.id ? null : msg.id)}
-                        title="Let them know you're coming"
-                        className="w-5 h-5 rounded-full bg-slate-800/60 border border-slate-700 text-slate-400 hover:text-amber-400 hover:border-amber-500/50 flex items-center justify-center transition-all cursor-pointer shrink-0"
-                      >
-                        <Plus className="w-3 h-3" />
-                      </button>
+                  {isEmojiOnlyText(msg.text) ? (
+                    <div className="text-4xl sm:text-5xl leading-none px-0.5">
+                      {msg.text}
+                    </div>
+                  ) : (
+                    <div
+                      className={`px-3 py-2 sm:px-3.5 sm:py-2.5 rounded-2xl text-xs sm:text-sm font-semibold leading-relaxed break-words shadow-xs ${
+                        isMe
+                          ? "bg-amber-500 text-slate-950 rounded-tr-none"
+                          : "bg-slate-800/90 text-slate-100 border border-slate-700/80 rounded-tl-none"
+                      }`}
+                    >
+                      {msg.text}
                     </div>
                   )}
 
-                  {isBeaconMsg && openPickerMsgId === msg.id && (
-                    <div className={`flex flex-wrap gap-1 p-1.5 bg-slate-800/90 border border-slate-700 rounded-xl max-w-[220px] ${isMe ? "justify-end ml-auto" : "justify-start"}`}>
-                      {BEACON_TRAVEL_REACTIONS.map((r) => {
-                        const reacted = (msg.reactions?.[r.key] || []).includes(currentUser);
-                        return (
-                          <button
-                            key={r.key}
-                            type="button"
-                            onClick={() => handleToggleMessageReaction(msg.id, r.key)}
-                            title={r.label}
-                            className={`px-1.5 py-1 rounded-lg text-sm flex items-center justify-center transition-all cursor-pointer ${
-                              reacted ? "bg-amber-500/25 ring-1 ring-amber-500" : "hover:bg-slate-700/60"
-                            }`}
-                          >
-                            {r.emoji}
-                          </button>
-                        );
-                      })}
+                  {isBeaconMsg && (
+                    <div className={`relative flex ${isMe ? "justify-end" : "justify-start"}`}>
+                      <button
+                        type="button"
+                        onClick={() => setOpenPickerMsgId(openPickerMsgId === msg.id ? null : msg.id)}
+                        className="px-2 py-1 rounded-full bg-slate-800/60 border border-slate-700 text-slate-300 hover:text-amber-400 hover:border-amber-500/50 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                      >
+                        <Smile className="w-3 h-3" />
+                        I'm coming...
+                      </button>
+
+                      {openPickerMsgId === msg.id && (
+                        <div
+                          className={`absolute bottom-full mb-2 ${isMe ? "right-0" : "left-0"} z-20 grid grid-cols-5 gap-1 p-2 bg-slate-800 border border-slate-700 rounded-xl shadow-lg w-[210px]`}
+                        >
+                          {BEACON_TRAVEL_REACTIONS.map((r) => (
+                            <button
+                              key={r.key}
+                              type="button"
+                              onClick={() => handleSendEmojiReply(r.emoji)}
+                              title={r.label}
+                              className="w-8 h-8 rounded-lg text-lg flex items-center justify-center hover:bg-slate-700/70 transition-all cursor-pointer"
+                            >
+                              {r.emoji}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
