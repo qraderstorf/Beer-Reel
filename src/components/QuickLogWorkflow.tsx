@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Camera, Star, X, Check, Loader2, Award, Percent, MessageSquare, RefreshCw, Sparkles, Plus, History, RotateCcw, MapPin, LocateFixed, ChevronDown } from "lucide-react";
+import { Camera, Star, X, Check, Loader2, Award, Percent, MessageSquare, RefreshCw, Sparkles, Plus, History, MapPin, LocateFixed, ChevronDown } from "lucide-react";
 import { BeerLog, UserProfile } from "../types";
 import { PRELOADED_BEERS, PreloadedBeer, normalizeBeerName, searchBeers } from "../data/beerCatalog";
 import { compressAndResizeImage } from "../utils";
@@ -244,8 +244,9 @@ export default function QuickLogWorkflow({
     );
   };
 
-  // Step 2: Instant Post!
-  const handleInstantPost = async () => {
+  // Step 2: Post the photo with no details yet - beer, location, rating and
+  // caption all get filled in afterward on the enrich screen.
+  const handlePost = async () => {
     if (!capturedPhoto) {
       setError("No photo available to post!");
       return;
@@ -257,8 +258,8 @@ export default function QuickLogWorkflow({
     // Upload base64 image first to obtain short URL
     const shortImageUrl = await ensureShortImageUrl(capturedPhoto);
 
-    // Instant Post payload: whatever beer was picked (if any) is used, with safe defaults
-    // for a valid backend schema when someone posts without picking one.
+    // Nothing's been picked yet at this point - the log goes up with safe
+    // defaults, and every field below gets filled in on the enrich screen next.
     const normalized = normalizeBeerName(beerName);
     const cleanedName = normalized.name || beerName.trim() || "Unnamed Pint";
     const numericAbv = abv ? parseFloat(abv) : (normalized.abv || 0);
@@ -306,7 +307,7 @@ export default function QuickLogWorkflow({
         setIsAutofilled(true);
       }
 
-      // Post succeeded! Instantly transition to the Optional Enrichment page
+      // Post succeeded - on to the enrich screen to fill in the details.
       setStep("enrich");
     } catch (err: any) {
       console.error(err);
@@ -549,17 +550,17 @@ export default function QuickLogWorkflow({
               </div>
             )}
 
-            {/* Step 2: Photo Preview & Instant Post */}
+            {/* Step 2: Photo Preview - snap it and go, everything else gets added after */}
             {step === "preview" && capturedPhoto && (
-              <div className="space-y-6">
-                <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 max-h-72 w-full flex items-center justify-center shadow-md">
+              <div className="space-y-5">
+                <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 max-h-80 w-full flex items-center justify-center shadow-md">
                   <img
                     src={capturedPhoto}
                     alt="Captured pint preview"
-                    className="object-cover max-h-72 w-full"
+                    className="object-cover max-h-80 w-full"
                     referrerPolicy="no-referrer"
                   />
-                  
+
                   <button
                     onClick={triggerCamera}
                     className="absolute bottom-3 right-3 bg-slate-900/80 backdrop-blur-sm text-white p-2 rounded-xl text-xs font-bold hover:bg-slate-900 transition-all flex items-center gap-1 border border-white/10"
@@ -569,123 +570,12 @@ export default function QuickLogWorkflow({
                   </button>
                 </div>
 
-                {/* One-tap repeat shortcut for whatever was logged last time */}
-                {userPreviousBeers.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => selectSuggestion(userPreviousBeers[0])}
-                    className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 bg-amber-500/10 hover:bg-amber-500/15 border border-amber-500/30 rounded-xl transition-all cursor-pointer"
-                  >
-                    <span className="flex items-center gap-1.5 text-xs font-bold text-amber-700 dark:text-amber-400">
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      Same as last time
-                    </span>
-                    <span className="text-[11px] font-semibold text-amber-600/80 dark:text-amber-400/70 truncate max-w-[55%]">
-                      {userPreviousBeers[0].name}
-                    </span>
-                  </button>
-                )}
+                <p className="text-center text-xs text-slate-400">
+                  Post it now, add the beer, rating, and location after.
+                </p>
 
-                {/* Subtle, fully optional beer name + rating - easy to ignore entirely */}
-                <div className="relative flex items-center gap-2.5">
-                  <div className="flex-1 min-w-0 flex items-center gap-1.5 px-3 py-2 bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 rounded-full">
-                    <span className="text-xs shrink-0 opacity-70">🍺</span>
-                    <input
-                      type="text"
-                      autoComplete="off"
-                      placeholder="What are you drinking? (optional)"
-                      value={beerName}
-                      onChange={(e) => handleBeerNameType(e.target.value)}
-                      onFocus={() => setShowSuggestions(true)}
-                      className="flex-1 min-w-0 bg-transparent border-0 text-xs text-slate-600 dark:text-slate-300 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none"
-                    />
-                  </div>
-                  <div className="flex items-center shrink-0">
-                    {[1, 2, 3, 4, 5].map((star) => (
-                      <button
-                        key={star}
-                        type="button"
-                        onClick={() => setRating(rating === star ? 0 : star)}
-                        className="p-1.5 -m-0.5 focus:outline-none cursor-pointer"
-                        title="Rating (optional)"
-                      >
-                        <Star
-                          className={`w-5 h-5 transition-all ${
-                            star <= rating
-                              ? "fill-amber-400 text-amber-400"
-                              : "text-slate-300 dark:text-slate-700"
-                          }`}
-                        />
-                      </button>
-                    ))}
-                  </div>
-
-                  {showSuggestions && filteredSuggestions.length > 0 && (
-                    <div className="absolute left-0 right-0 top-full mt-1.5 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl z-30 max-h-44 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-900">
-                      {filteredSuggestions.slice(0, 6).map((beer) => (
-                        <button
-                          key={beer.name}
-                          type="button"
-                          onClick={() => selectSuggestion(beer)}
-                          className="w-full text-left px-3.5 py-2 hover:bg-amber-50 dark:hover:bg-amber-950/20 transition-colors flex items-center justify-between text-xs cursor-pointer"
-                        >
-                          <span className="font-bold text-slate-800 dark:text-slate-200">{beer.name}</span>
-                          <span className="text-slate-400">{beer.style}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {userPreviousBeers.length > 1 && (
-                  <div className="-mt-3 flex items-center gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
-                    {userPreviousBeers.slice(1, 6).map((beer, idx) => (
-                      <button
-                        key={`preview-prev-${beer.name}-${idx}`}
-                        type="button"
-                        onClick={() => selectSuggestion(beer)}
-                        className={`shrink-0 px-2.5 py-1 text-[11px] font-bold rounded-full border transition-all cursor-pointer ${
-                          beerName.toLowerCase().trim() === beer.name.toLowerCase().trim()
-                            ? "bg-amber-500 text-slate-950 border-amber-500"
-                            : "bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400"
-                        }`}
-                      >
-                        {beer.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {/* Subtle, fully optional location box - type it, or one tap to use device location */}
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 rounded-full">
-                    <MapPin className="w-3.5 h-3.5 shrink-0 opacity-70 text-slate-500" />
-                    <input
-                      type="text"
-                      autoComplete="off"
-                      placeholder="Where are you? (optional)"
-                      value={location}
-                      onChange={(e) => setLocation(e.target.value)}
-                      className="flex-1 min-w-0 bg-transparent border-0 text-xs text-slate-600 dark:text-slate-300 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleUseMyLocation}
-                      disabled={isLocating}
-                      title="Use my location"
-                      className="shrink-0 p-1 rounded-full text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 transition-all cursor-pointer disabled:opacity-50"
-                    >
-                      {isLocating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LocateFixed className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                  {locationError && (
-                    <p className="text-[10px] text-red-500 dark:text-red-400 px-1">{locationError}</p>
-                  )}
-                </div>
-
-                {/* Single main instant post button */}
                 <button
-                  onClick={handleInstantPost}
+                  onClick={handlePost}
                   disabled={isSubmittingLog}
                   className="w-full bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-extrabold py-3.5 px-4 rounded-xl shadow-lg shadow-amber-500/20 focus:outline-none disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer text-sm"
                 >
@@ -806,80 +696,71 @@ export default function QuickLogWorkflow({
                   )}
                 </div>
 
-                {/* 2. Rating Star scale - only when this screen is the sole chance to rate:
-                    editing an existing log, or the no-photo manual-log path where Preview
-                    (which already has its own rating row) never ran. If a photo was just
-                    instant-posted, rating was already collected on Preview - asking again
-                    here would just be the same question twice. */}
-                {(editLog || !activeLog) && (
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
-                      How creamy is this pint?
-                    </label>
-                    <div className="flex flex-col items-center gap-2 p-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl">
-                      <div className="flex items-center gap-1.5">
-                        {[1, 2, 3, 4, 5].map((star) => (
-                          <button
-                            key={star}
-                            type="button"
-                            onClick={() => setRating(star)}
-                            className="p-1 focus:outline-none transition-transform active:scale-90"
-                          >
-                            <Star
-                              className={`w-7 h-7 transition-all ${
-                                star <= rating
-                                  ? "fill-amber-400 text-amber-400 scale-110"
-                                  : "text-slate-300 dark:text-slate-700"
-                              }`}
-                            />
-                          </button>
-                        ))}
-                      </div>
-                      {rating > 0 && (
-                        <span className="text-[11px] font-extrabold text-amber-500 uppercase tracking-wider">
-                          {rating === 5 && "Bad day to be a Beer 🏆"}
-                          {rating === 4 && "Thats a Creamy Pint! 👍"}
-                          {rating === 3 && "Solid pint. 👌"}
-                          {rating === 2 && "Flat and Warm but still a pint. 👎"}
-                          {rating === 1 && "Filled with Regret 🤮"}
-                        </span>
-                      )}
+                {/* 2. Rating Star scale */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                    How creamy is this pint?
+                  </label>
+                  <div className="flex flex-col items-center gap-2 p-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl">
+                    <div className="flex items-center gap-1.5">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          type="button"
+                          onClick={() => setRating(star)}
+                          className="p-1 focus:outline-none transition-transform active:scale-90"
+                        >
+                          <Star
+                            className={`w-7 h-7 transition-all ${
+                              star <= rating
+                                ? "fill-amber-400 text-amber-400 scale-110"
+                                : "text-slate-300 dark:text-slate-700"
+                            }`}
+                          />
+                        </button>
+                      ))}
                     </div>
-                  </div>
-                )}
-
-                {/* 3. Location - same visibility rule as rating above: skip it here if it
-                    was already offered on Preview for this exact post. */}
-                {(editLog || !activeLog) && (
-                  <div className="space-y-1">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                      Where are you?
-                    </label>
-                    <div className="flex items-center gap-2 px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl">
-                      <MapPin className="w-4 h-4 shrink-0 text-slate-400" />
-                      <input
-                        type="text"
-                        autoComplete="off"
-                        placeholder="Optional"
-                        value={location}
-                        onChange={(e) => setLocation(e.target.value)}
-                        className="flex-1 min-w-0 bg-transparent border-0 text-sm text-slate-800 dark:text-white placeholder-slate-400 focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleUseMyLocation}
-                        disabled={isLocating}
-                        title="Use my location"
-                        className="shrink-0 p-1 rounded-full text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 transition-all cursor-pointer disabled:opacity-50"
-                      >
-                        {isLocating ? <Loader2 className="w-4 h-4 animate-spin" /> : <LocateFixed className="w-4 h-4" />}
-                      </button>
-                    </div>
-                    {locationError && (
-                      <p className="text-[10px] text-red-500 dark:text-red-400 px-1">{locationError}</p>
+                    {rating > 0 && (
+                      <span className="text-[11px] font-extrabold text-amber-500 uppercase tracking-wider">
+                        {rating === 5 && "Bad day to be a Beer 🏆"}
+                        {rating === 4 && "Thats a Creamy Pint! 👍"}
+                        {rating === 3 && "Solid pint. 👌"}
+                        {rating === 2 && "Flat and Warm but still a pint. 👎"}
+                        {rating === 1 && "Filled with Regret 🤮"}
+                      </span>
                     )}
                   </div>
-                )}
+                </div>
+
+                {/* 3. Location */}
+                <div className="space-y-1">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                    Where are you?
+                  </label>
+                  <div className="flex items-center gap-2 px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl">
+                    <MapPin className="w-4 h-4 shrink-0 text-slate-400" />
+                    <input
+                      type="text"
+                      autoComplete="off"
+                      placeholder="Optional"
+                      value={location}
+                      onChange={(e) => setLocation(e.target.value)}
+                      className="flex-1 min-w-0 bg-transparent border-0 text-sm text-slate-800 dark:text-white placeholder-slate-400 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleUseMyLocation}
+                      disabled={isLocating}
+                      title="Use my location"
+                      className="shrink-0 p-1 rounded-full text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      {isLocating ? <Loader2 className="w-4 h-4 animate-spin" /> : <LocateFixed className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  {locationError && (
+                    <p className="text-[10px] text-red-500 dark:text-red-400 px-1">{locationError}</p>
+                  )}
+                </div>
 
                 {/* 4. Caption text field */}
                 <div>
