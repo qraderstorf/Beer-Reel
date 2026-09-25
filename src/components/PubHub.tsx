@@ -447,6 +447,7 @@ export default function PubHub({
   const [editPubEmblemType, setEditPubEmblemType] = useState<"emoji" | "url">("emoji");
   const [editPubEmoji, setEditPubEmoji] = useState("🍺");
   const [editPubUrl, setEditPubUrl] = useState("");
+  const [editPubIsPrivate, setEditPubIsPrivate] = useState(false);
 
   // Invite people state inside an existing pub
   const [invitingPubId, setInvitingPubId] = useState<string | null>(null);
@@ -606,6 +607,7 @@ export default function PubHub({
   const startEditing = (pub: Pub) => {
     setEditingPubId(pub.id);
     setEditPubName(pub.name);
+    setEditPubIsPrivate(!!pub.isPrivate);
     if (pub.emblem && isUrl(pub.emblem)) {
       setEditPubEmblemType("url");
       setEditPubUrl(pub.emblem);
@@ -637,6 +639,7 @@ export default function PubHub({
           id: pubId,
           name: editPubName.trim(),
           emblem,
+          isPrivate: editPubIsPrivate,
           owner: currentPub.owner,
           currentUser
         })
@@ -739,28 +742,6 @@ export default function PubHub({
       const updatedPub: Pub = await response.json();
       onPubUpdated(updatedPub);
       setSuccess(`Declined invite to "${updatedPub.name}".`);
-    } catch (err: any) {
-      setError(err.message || "An error occurred.");
-    }
-  };
-
-  const handleTogglePubPrivacy = async (pubId: string, nextIsPrivate: boolean) => {
-    setError(null);
-    setSuccess(null);
-    try {
-      const response = await fetch(`/api/pubs/${pubId}/privacy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ currentUser, isPrivate: nextIsPrivate })
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(data?.error || "Could not update the Pub's privacy setting.");
-      }
-      const updatedPub: Pub = await response.json();
-      onPubUpdated(updatedPub);
-      setSuccess(nextIsPrivate ? "Pub is now private - invite only." : "Pub is now public - anyone can join.");
     } catch (err: any) {
       setError(err.message || "An error occurred.");
     }
@@ -1875,17 +1856,6 @@ export default function PubHub({
                       <UserPlus className="w-3.5 h-3.5" />
                     </button>
                     <button
-                      onClick={() => handleTogglePubPrivacy(activePub.id, !activePub.isPrivate)}
-                      title={activePub.isPrivate ? "Private - only invited people can join. Click to make public." : "Public - anyone can join. Click to make invite-only."}
-                      className={`p-1.5 rounded-xl transition-all cursor-pointer w-[32px] h-[32px] flex items-center justify-center ${
-                        activePub.isPrivate
-                          ? "bg-rose-500/10 text-rose-500 hover:bg-rose-500/20"
-                          : "bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-600 dark:text-slate-300"
-                      }`}
-                    >
-                      {activePub.isPrivate ? <Lock className="w-3.5 h-3.5" /> : <Globe className="w-3.5 h-3.5" />}
-                    </button>
-                    <button
                       onClick={() => startEditing(activePub)}
                       className="p-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-600 dark:text-slate-300 rounded-xl transition-all cursor-pointer w-[32px] h-[32px] flex items-center justify-center"
                       title="Edit Pub"
@@ -2658,9 +2628,9 @@ export default function PubHub({
         )}
       </AnimatePresence>
 
-      {/* Modal to Edit Pub Details (name/emblem) - privacy has its own toggle button
-          in the action row, and inviting members has its own dedicated panel, so this
-          stays scoped to what handleUpdatePub actually submits. */}
+      {/* Modal to Edit Pub Details - name, emblem, and privacy all live here now,
+          grouped into clearly separated cards with a live preview up top; inviting
+          members still has its own dedicated panel. */}
       <AnimatePresence>
         {editingPubId && (
           <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-[110] flex items-start sm:items-center justify-center overflow-y-auto p-3 sm:p-4 py-6 animate-in fade-in duration-200">
@@ -2671,7 +2641,7 @@ export default function PubHub({
               transition={{ duration: 0.2, ease: "easeOut" }}
               className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md shadow-2xl flex flex-col overflow-hidden max-h-[92dvh]"
             >
-              <div className="flex items-center justify-between border-b border-slate-800/80 px-5 py-4 shrink-0">
+              <div className="flex items-center justify-between bg-gradient-to-br from-amber-500/15 to-transparent border-b border-slate-800/80 px-5 py-4 shrink-0">
                 <h3 className="font-extrabold text-slate-100 text-sm sm:text-base flex items-center gap-2">
                   <Edit2 className="w-5 h-5 text-amber-500" />
                   Edit Pub
@@ -2686,15 +2656,44 @@ export default function PubHub({
               </div>
 
               <div className="overflow-y-auto p-5 space-y-4 custom-scrollbar flex-1 min-h-0">
+                {/* Live preview - reflects name/emblem/privacy as they're edited */}
+                <div className="flex items-center gap-3 bg-gradient-to-br from-amber-500/10 to-slate-950/40 border border-amber-500/20 rounded-2xl p-3.5">
+                  <div className="w-14 h-14 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-center text-2xl overflow-hidden shrink-0">
+                    {editPubEmblemType === "url" && editPubUrl.trim() ? (
+                      <img
+                        key={editPubUrl}
+                        src={editPubUrl.trim()}
+                        alt=""
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover"
+                        onError={(e) => { e.currentTarget.style.display = "none"; }}
+                      />
+                    ) : (
+                      <span>{editPubEmblemType === "emoji" ? editPubEmoji : "🍺"}</span>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[9px] font-black uppercase tracking-wider text-amber-500/80">Preview</p>
+                    <p className="font-extrabold text-slate-100 text-sm truncate">{editPubName.trim() || "Unnamed Pub"}</p>
+                    <p className="text-[10px] text-slate-400 font-semibold flex items-center gap-1 mt-0.5">
+                      {editPubIsPrivate ? (
+                        <><Lock className="w-3 h-3" /> Invite only</>
+                      ) : (
+                        <><Globe className="w-3 h-3" /> Public</>
+                      )}
+                    </p>
+                  </div>
+                </div>
+
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
                     handleUpdatePub(editingPubId);
                   }}
-                  className="space-y-4"
+                  className="space-y-3.5"
                 >
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  <div className="bg-slate-950/40 border border-slate-800/60 rounded-2xl p-3.5">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
                       Pub Name
                     </label>
                     <input
@@ -2706,8 +2705,8 @@ export default function PubHub({
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1">
+                  <div className="bg-slate-950/40 border border-slate-800/60 rounded-2xl p-3.5">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
                       Pub Emblem
                     </label>
                     <div className="flex gap-2 mb-2">
@@ -2764,6 +2763,41 @@ export default function PubHub({
                         <p className="text-[9px] text-slate-400 mt-1">Provide a direct web image path/link to set as your custom pub emblem.</p>
                       </div>
                     )}
+                  </div>
+
+                  <div className="bg-slate-950/40 border border-slate-800/60 rounded-2xl p-3.5">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                      Who Can Join
+                    </label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditPubIsPrivate(false)}
+                        className={`flex-1 py-1.5 px-2.5 text-[10px] font-black uppercase tracking-wider rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                          !editPubIsPrivate
+                            ? "bg-amber-500/20 border-amber-500 text-amber-400 font-extrabold"
+                            : "bg-slate-950 border-slate-800 text-slate-500"
+                        }`}
+                      >
+                        <Globe className="w-3.5 h-3.5" /> Public
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditPubIsPrivate(true)}
+                        className={`flex-1 py-1.5 px-2.5 text-[10px] font-black uppercase tracking-wider rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                          editPubIsPrivate
+                            ? "bg-amber-500/20 border-amber-500 text-amber-400 font-extrabold"
+                            : "bg-slate-950 border-slate-800 text-slate-500"
+                        }`}
+                      >
+                        <Lock className="w-3.5 h-3.5" /> Private
+                      </button>
+                    </div>
+                    <p className="text-[9px] text-slate-400 mt-1.5">
+                      {editPubIsPrivate
+                        ? "Private - only people you invite can join."
+                        : "Public - anyone can find and join this Pub."}
+                    </p>
                   </div>
 
                   <button
