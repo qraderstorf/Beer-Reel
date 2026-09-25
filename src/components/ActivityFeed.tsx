@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
-import { Star, MessageSquare, Flame, Trash2, Heart, Search, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, X, Flag, MapPin, Globe, Users as UsersIcon } from "lucide-react";
+import { Star, MessageSquare, Flame, Trash2, Heart, Search, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, X, Flag, MapPin, Globe, Users as UsersIcon, MoreHorizontal } from "lucide-react";
 import { BeerLog, UserProfile, isSeymoreBeers } from "../types";
 import { useRetryImage } from "../utils";
 import UserAvatar from "./UserAvatar";
@@ -314,6 +314,19 @@ const CUSTOM_EMOJIS: { emoji: string; label: string; theme: ReactionTheme }[] = 
   { emoji: "😮", label: "Gasp", theme: "indigo" },
 ];
 
+// The tapback-style "first look" row shown when you tap the react button - the same
+// 5 reactions that already get their own pill in the bar below once someone's used
+// them, stored under these semantic keys (not the raw emoji) so they line up with the
+// existing preset pills and server-side notification labels. Anything beyond these
+// five lives one tap further in, in the full CUSTOM_EMOJIS grid.
+const QUICK_REACTION_PRESETS: { key: string; emoji: string; label: string }[] = [
+  { key: "cheers", emoji: "🍻", label: "Cheers" },
+  { key: "creamy", emoji: "🍺", label: "Creamy" },
+  { key: "fomo", emoji: "🚨", label: "FOMO Alert" },
+  { key: "nightnight", emoji: "🌙", label: "Night night" },
+  { key: "dislike", emoji: "👎", label: "Imposter" },
+];
+
 function getReactionTheme(key: string): ReactionTheme {
   const byEmoji = CUSTOM_EMOJIS.find((e) => e.emoji === key);
   if (byEmoji) return byEmoji.theme;
@@ -321,29 +334,35 @@ function getReactionTheme(key: string): ReactionTheme {
   return byLabel?.theme || "amber";
 }
 
-// Renders the custom-emoji grid in a fixed-position portal anchored to the "+" button's
-// live on-screen position. A portal (rather than an absolutely-positioned child of the
-// post card) is required here: post cards are wrapped in framer-motion's `motion.div`
-// with layout animations, which apply a CSS transform and would silently make any
-// `position: fixed` descendant relative to that card instead of the viewport - exactly
-// what was clipping the picker off-screen whenever it opened near the top of the feed.
-// Position is recomputed from the anchor element on every scroll/resize (rather than
-// closing on scroll) so it tracks the button instead of visually detaching from it.
-function ReactionEmojiPicker({
+// Tapback-style reaction picker, in a fixed-position portal anchored to the react
+// button's live on-screen position. A portal (rather than an absolutely-positioned
+// child of the post card) is required here: post cards are wrapped in framer-motion's
+// `motion.div` with layout animations, which apply a CSS transform and would silently
+// make any `position: fixed` descendant relative to that card instead of the viewport
+// - exactly what was clipping the picker off-screen whenever it opened near the top of
+// the feed. Position is recomputed from the anchor element on every scroll/resize
+// (rather than closing on scroll) so it tracks the button instead of detaching from it.
+//
+// Opens on a compact 5-item "quick" row (iMessage tapback-style) and only drops down
+// into the full emoji grid if you tap "more" - most reactions people actually send are
+// one of the five, so this avoids making everyone scan a ~25-emoji wall just to hit
+// Cheers.
+function ReactionPicker({
   anchorEl,
   onSelect,
   onClose,
 }: {
   anchorEl: HTMLElement;
-  onSelect: (emoji: string) => void;
+  onSelect: (value: string) => void;
   onClose: () => void;
 }) {
+  const [view, setView] = useState<"quick" | "full">("quick");
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [style, setStyle] = useState<{ top: number; left: number } | null>(null);
+  const popoverWidth = view === "quick" ? 236 : 260;
 
   useEffect(() => {
     const margin = 8;
-    const popoverWidth = 260;
 
     const reposition = () => {
       if (!anchorEl.isConnected) {
@@ -351,7 +370,7 @@ function ReactionEmojiPicker({
         return;
       }
       const anchorRect = anchorEl.getBoundingClientRect();
-      const popoverHeight = popoverRef.current?.offsetHeight || 320;
+      const popoverHeight = popoverRef.current?.offsetHeight || (view === "quick" ? 56 : 320);
 
       const roomAbove = anchorRect.top - margin;
       const top =
@@ -383,7 +402,7 @@ function ReactionEmojiPicker({
       window.removeEventListener("scroll", onScrollOrResize, true);
       window.removeEventListener("resize", onScrollOrResize);
     };
-  }, [anchorEl, onClose]);
+  }, [anchorEl, onClose, view, popoverWidth]);
 
   return createPortal(
     <>
@@ -396,30 +415,56 @@ function ReactionEmojiPicker({
           position: "fixed",
           top: style?.top ?? -9999,
           left: style?.left ?? -9999,
-          width: 260,
+          width: popoverWidth,
           visibility: style ? "visible" : "hidden",
         }}
-        className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 shadow-2xl z-[96] max-h-[340px] overflow-y-auto custom-scrollbar"
+        className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-[96] overflow-hidden"
       >
-        <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 pl-0.5">React with Emoji</span>
-        <div className="grid grid-cols-4 gap-1 mt-1.5">
-          {CUSTOM_EMOJIS.map((em) => {
-            const theme = THEME_STYLES[em.theme];
-            return (
+        {view === "quick" ? (
+          <div className="flex items-center gap-1 p-1.5">
+            {QUICK_REACTION_PRESETS.map((p) => (
               <button
-                key={em.emoji}
+                key={p.key}
                 type="button"
-                onClick={() => onSelect(em.emoji)}
-                className={`flex flex-col items-center justify-center gap-0.5 rounded-lg border py-1.5 px-0.5 transition-all active:scale-90 hover:scale-105 cursor-pointer select-none ${theme.cell}`}
+                onClick={() => onSelect(p.key)}
+                title={p.label}
+                className="w-9 h-9 flex items-center justify-center text-xl rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 active:scale-90 transition-all cursor-pointer select-none"
               >
-                <span className="text-lg leading-none">{em.emoji}</span>
-                <span className="text-[7.5px] font-black uppercase tracking-wide leading-none truncate max-w-full">
-                  {em.label}
-                </span>
+                {p.emoji}
               </button>
-            );
-          })}
-        </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => setView("full")}
+              title="More reactions"
+              className="w-9 h-9 flex items-center justify-center rounded-full border border-slate-200 dark:border-slate-700 text-slate-400 hover:text-amber-500 hover:border-amber-400 transition-all cursor-pointer shrink-0"
+            >
+              <MoreHorizontal className="w-4 h-4" />
+            </button>
+          </div>
+        ) : (
+          <div className="p-2.5 max-h-[340px] overflow-y-auto custom-scrollbar">
+            <span className="text-[9px] font-black uppercase tracking-wider text-slate-400 pl-0.5">React with Emoji</span>
+            <div className="grid grid-cols-4 gap-1 mt-1.5">
+              {CUSTOM_EMOJIS.map((em) => {
+                const theme = THEME_STYLES[em.theme];
+                return (
+                  <button
+                    key={em.emoji}
+                    type="button"
+                    onClick={() => onSelect(em.emoji)}
+                    className={`flex flex-col items-center justify-center gap-0.5 rounded-lg border py-1.5 px-0.5 transition-all active:scale-90 hover:scale-105 cursor-pointer select-none ${theme.cell}`}
+                  >
+                    <span className="text-lg leading-none">{em.emoji}</span>
+                    <span className="text-[7.5px] font-black uppercase tracking-wide leading-none truncate max-w-full">
+                      {em.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </>,
     document.body
@@ -448,7 +493,7 @@ export default function ActivityFeed({
   hasMore
 }: ActivityFeedProps) {
   const [activeReactionTooltip, setActiveReactionTooltip] = useState<string | null>(null);
-  const [activeCustomEmojiPicker, setActiveCustomEmojiPicker] = useState<{ logId: string; el: HTMLElement } | null>(null);
+  const [activeReactionPicker, setActiveReactionPicker] = useState<{ logId: string; el: HTMLElement } | null>(null);
   const [activeReportLogId, setActiveReportLogId] = useState<string | null>(null);
   const [reportReason, setReportReason] = useState("");
   const [reportNote, setReportNote] = useState("");
@@ -519,7 +564,7 @@ export default function ActivityFeed({
   useEffect(() => {
     const handleGlobalClick = () => {
       setActiveReactionTooltip(null);
-      setActiveCustomEmojiPicker(null);
+      setActiveReactionPicker(null);
     };
 
     document.addEventListener("click", handleGlobalClick);
@@ -1479,38 +1524,38 @@ export default function ActivityFeed({
                               );
                             })}
 
-                            {/* Add Custom Emoji Popup Button */}
+                            {/* React Button - opens the tapback-style quick picker */}
                             <div className="relative shrink-0">
                               <button
                                 onClick={(e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
-                                  if (activeCustomEmojiPicker?.logId === log.id) {
-                                    setActiveCustomEmojiPicker(null);
+                                  if (activeReactionPicker?.logId === log.id) {
+                                    setActiveReactionPicker(null);
                                   } else {
-                                    setActiveCustomEmojiPicker({ logId: log.id, el: e.currentTarget });
+                                    setActiveReactionPicker({ logId: log.id, el: e.currentTarget });
                                   }
                                 }}
                                 onTouchStart={(e) => {
                                   e.stopPropagation();
                                 }}
                                 className={`flex items-center justify-center w-5 h-5 rounded-full border transition-all cursor-pointer ${
-                                  activeCustomEmojiPicker?.logId === log.id
+                                  activeReactionPicker?.logId === log.id
                                     ? "bg-amber-500 border-amber-500 text-white"
                                     : "border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 hover:text-amber-500"
                                 }`}
-                                title="Add custom emoji reaction"
+                                title="React"
                               >
                                 <Plus className="w-3 h-3" />
                               </button>
 
-                              {activeCustomEmojiPicker?.logId === log.id && (
-                                <ReactionEmojiPicker
-                                  anchorEl={activeCustomEmojiPicker.el}
-                                  onClose={() => setActiveCustomEmojiPicker(null)}
-                                  onSelect={(emoji) => {
-                                    handleReact(log.id, emoji);
-                                    setActiveCustomEmojiPicker(null);
+                              {activeReactionPicker?.logId === log.id && (
+                                <ReactionPicker
+                                  anchorEl={activeReactionPicker.el}
+                                  onClose={() => setActiveReactionPicker(null)}
+                                  onSelect={(value) => {
+                                    handleReact(log.id, value);
+                                    setActiveReactionPicker(null);
                                   }}
                                 />
                               )}
