@@ -1767,8 +1767,15 @@ export default function PubHub({
         </button>
       </div>
 
+      {/* Zone: The Bar - who's here, the roster, and the chat corner */}
+      <div className="flex items-center gap-2 px-0.5 pt-1">
+        <span className="text-base">🍺</span>
+        <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-600 dark:text-amber-500">The Bar</h2>
+        <div className="flex-1 h-px bg-gradient-to-r from-amber-500/40 via-amber-500/10 to-transparent" />
+      </div>
+
       {/* Active pub identity + compact actions */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-3 sm:p-3.5 shadow-2xs space-y-2.5">
+      <div className="bg-white dark:bg-slate-900 border border-amber-200/70 dark:border-amber-900/40 rounded-2xl p-3 sm:p-3.5 shadow-2xs space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="p-1 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg shrink-0">
@@ -1979,7 +1986,7 @@ export default function PubHub({
 
       {/* Banter & Chat - minimized to a collapsible strip. Beacon calls land
           here as regular messages, so lighting a beacon auto-expands it. */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-amber-200/70 dark:border-amber-900/40 shadow-xs overflow-hidden">
         <button
           type="button"
           onClick={() => setChatExpanded((v) => !v)}
@@ -2021,8 +2028,15 @@ export default function PubHub({
         )}
       </div>
 
-      {/* TAB SWITCHER - Widgets is the primary/default tab, Superlatives second */}
-      <div className="flex items-center gap-1.5 p-1.5 bg-slate-100 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xs">
+      {/* Zone: On Tap / Trophy Wall - the stats board and the honors case, one
+          tab switcher between them since they're both "what's happening here" */}
+      <div className="flex items-center gap-2 px-0.5 pt-1">
+        <span className="text-base">🍻</span>
+        <h2 className="text-[10px] font-black uppercase tracking-[0.2em] text-amber-600 dark:text-amber-500">On Tap</h2>
+        <div className="flex-1 h-px bg-gradient-to-r from-amber-500/40 via-amber-500/10 to-transparent" />
+      </div>
+
+      <div className="flex items-center gap-1.5 p-1.5 bg-amber-50 dark:bg-slate-900/90 border border-amber-200/60 dark:border-amber-900/40 rounded-2xl shadow-2xs">
         <button
           type="button"
           onClick={() => setActiveTab("widgets")}
@@ -2033,7 +2047,7 @@ export default function PubHub({
           }`}
         >
           <Gauge className="w-3.5 h-3.5" />
-          <span>Widgets</span>
+          <span>On Tap</span>
         </button>
 
         <button
@@ -2046,7 +2060,7 @@ export default function PubHub({
           }`}
         >
           <Award className="w-3.5 h-3.5" />
-          <span>Superlatives</span>
+          <span>Trophy Wall</span>
         </button>
       </div>
 
@@ -2064,14 +2078,14 @@ export default function PubHub({
         </div>
       )}
 
-      {/* HONOR ROLL / SUPERLATIVES TAB */}
+      {/* TROPHY WALL / SUPERLATIVES TAB */}
       {activeTab === "superlatives" && pubSuperlatives && (
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs p-4 sm:p-5 space-y-3.5">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3 gap-2.5">
+        <div className="bg-gradient-to-br from-amber-50 to-white dark:from-amber-950/20 dark:to-slate-900 rounded-2xl border border-amber-200/70 dark:border-amber-900/40 shadow-xs p-4 sm:p-5 space-y-3.5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-amber-100 dark:border-amber-900/30 pb-3 gap-2.5">
             <div>
               <h3 className="text-xs sm:text-sm font-extrabold text-slate-800 dark:text-slate-100 tracking-tight flex items-center gap-1.5">
                 <Award className="w-4 h-4 text-amber-500" />
-                Pub Honor Roll & Superlatives
+                Trophy Wall — Pub Honor Roll
               </h3>
               <p className="text-[10px] sm:text-[11px] text-slate-400 mt-0.5">
                 Comedic & rotating weekly honors calculated for pub members
@@ -2181,9 +2195,9 @@ export default function PubHub({
         </div>
       )}
 
-      {/* GAUGE WIDGETS (customizable) */}
+      {/* ON TAP - GAUGE WIDGETS (customizable), framed like a chalkboard board */}
       {activeTab === "widgets" && (
-        <div className="space-y-3">
+        <div className="space-y-3 p-3 sm:p-4 rounded-3xl bg-gradient-to-b from-emerald-50 to-transparent dark:from-emerald-950/25 dark:to-transparent border border-emerald-200/60 dark:border-emerald-900/30">
           {activeWidgets.map((widget) => {
             const catalogEntry = WIDGET_CATALOG.find((c) => c.type === widget.type);
             const HeaderIcon = catalogEntry?.icon || Beer;
