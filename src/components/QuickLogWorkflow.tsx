@@ -167,6 +167,11 @@ export default function QuickLogWorkflow({
         const base64 = await compressAndResizeImage(file);
         setCapturedPhoto(base64);
         setStep("preview");
+        // Kick off location capture the moment there's a photo, rather than
+        // waiting for someone to tap "use my location" - gives it the most
+        // possible lead time to resolve before Post is tapped, without ever
+        // making Post itself wait on it.
+        autoFillLocation();
       } catch (err) {
         console.error(err);
         setError("Failed to process photo. Please try again.");
@@ -242,6 +247,15 @@ export default function QuickLogWorkflow({
       },
       { timeout: 8000, maximumAge: 60000 }
     );
+  };
+
+  // Auto version of "use my location" - same lookup, but only runs if the box
+  // is still empty, so it never clobbers something already resolved or typed
+  // in by hand. Fired automatically as soon as there's something to post,
+  // rather than waiting on an explicit tap.
+  const autoFillLocation = () => {
+    if (location.trim()) return;
+    handleUseMyLocation();
   };
 
   // Step 2: Post the photo with no details yet - beer, location, rating and
@@ -530,6 +544,7 @@ export default function QuickLogWorkflow({
                           setIsAutofilled(true);
                         }
                         setStep("enrich");
+                        autoFillLocation();
                       }}
                       className="w-full px-5 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 border border-slate-200 dark:border-slate-700"
                     >
