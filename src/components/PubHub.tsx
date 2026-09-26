@@ -372,6 +372,7 @@ export default function PubHub({
   const [success, setSuccess] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showPubSwitcher, setShowPubSwitcher] = useState(false);
   const [showRoster, setShowRoster] = useState<Record<string, boolean>>({});
   const [allBeers, setAllBeers] = useState<BeerLog[]>([]);
   const [loadingBeers, setLoadingBeers] = useState(false);
@@ -1706,66 +1707,6 @@ export default function PubHub({
         </div>
       )}
 
-      {/* Pub switcher - horizontal cards instead of a dropdown, so you can actually see
-          what you're picking between instead of reading option text one at a time */}
-      <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar pb-0.5 -mx-0.5 px-0.5">
-        {myPubs.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => handleSelectPub(p.id)}
-            className={`shrink-0 w-[76px] flex flex-col items-center gap-1 p-2 rounded-2xl border-2 transition-all cursor-pointer ${
-              p.id === activePubId
-                ? "bg-amber-500/10 border-amber-500 shadow-md"
-                : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-amber-300"
-            }`}
-          >
-            <div className="relative">
-              <div className="w-9 h-9 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex items-center justify-center">
-                <PubEmblem emblem={p.emblem} sizeClass="w-5 h-5 text-base" />
-              </div>
-              {pinnedPubId === p.id && (
-                <Pin className="w-3 h-3 text-amber-500 fill-amber-500 absolute -top-1 -right-1" />
-              )}
-              <span className="absolute -bottom-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-slate-800 dark:bg-slate-700 border border-white dark:border-slate-900 text-[8px] font-black text-white flex items-center justify-center leading-none">
-                {p.members.length}
-              </span>
-            </div>
-            <span className="text-[10px] font-extrabold text-slate-800 dark:text-slate-100 truncate w-full text-center leading-tight">
-              {p.name}
-            </span>
-          </button>
-        ))}
-
-        {myInvites.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => handleSelectPub(p.id)}
-            className={`shrink-0 w-[76px] flex flex-col items-center gap-1 p-2 rounded-2xl border-2 border-dashed transition-all cursor-pointer ${
-              p.id === activePubId
-                ? "bg-emerald-500/10 border-emerald-500 shadow-md"
-                : "bg-white dark:bg-slate-900 border-emerald-300 dark:border-emerald-800 hover:border-emerald-500"
-            }`}
-          >
-            <div className="w-9 h-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 flex items-center justify-center text-sm">
-              ✉️
-            </div>
-            <span className="text-[10px] font-extrabold text-emerald-700 dark:text-emerald-400 truncate w-full text-center leading-tight">
-              {p.name}
-            </span>
-          </button>
-        ))}
-
-        <button
-          type="button"
-          onClick={() => setShowCreateModal(true)}
-          className="shrink-0 w-[76px] flex flex-col items-center justify-center gap-1 p-2 rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 text-slate-400 hover:text-amber-500 hover:border-amber-400 transition-all cursor-pointer min-h-[68px]"
-        >
-          <Plus className="w-5 h-5 stroke-[3px]" />
-          <span className="text-[10px] font-extrabold">New Pub</span>
-        </button>
-      </div>
 
       {/* Zone: The Bar - who's here, the roster, and the chat corner */}
       <div className="flex items-center gap-2 px-0.5 pt-1">
@@ -1777,22 +1718,28 @@ export default function PubHub({
       {/* Active pub identity + compact actions */}
       <div className="bg-white dark:bg-slate-900 border border-amber-200/70 dark:border-amber-900/40 rounded-2xl p-3 sm:p-3.5 shadow-2xs space-y-2.5">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
+          <button
+            type="button"
+            onClick={() => setShowPubSwitcher(true)}
+            title="Switch or create a Pub"
+            className="flex items-center gap-2.5 min-w-0 text-left cursor-pointer group"
+          >
             <div className="p-1 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg shrink-0">
               {activePub ? <PubEmblem emblem={activePub.emblem} sizeClass="w-7 h-7 text-lg" /> : <span className="shrink-0 text-lg">🍻</span>}
             </div>
             <div className="min-w-0">
-              <h1 className="text-sm sm:text-base font-black text-slate-900 dark:text-white leading-tight flex items-center gap-1.5 min-w-0">
+              <h1 className="text-sm sm:text-base font-black text-slate-900 dark:text-white leading-tight flex items-center gap-1 min-w-0">
                 <span className="truncate">{activePub ? activePub.name : "No Pub Selected"}</span>
                 {activePub?.isPrivate && (
                   <Lock className="w-3 h-3 text-slate-400 shrink-0" title="Private - invite only" />
                 )}
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0 group-hover:text-amber-500 transition-colors" />
               </h1>
               <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium truncate">
                 Host: @{activePub?.owner || "System"} • <span className="font-bold text-amber-500">{activePubFilteredLogs.length} Pints</span>
               </p>
             </div>
-          </div>
+          </button>
 
           <div className="flex items-center gap-1.5 shrink-0">
             {activePub && !activePub.members.includes(currentUser) ? (
@@ -1885,26 +1832,6 @@ export default function PubHub({
           </div>
         </div>
 
-        {otherPubs.length > 0 && (
-          <details className="text-[11px]">
-            <summary className="text-slate-400 font-bold cursor-pointer select-none">
-              🧭 Explore {otherPubs.length} other Pub{otherPubs.length === 1 ? "" : "s"}
-            </summary>
-            <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pt-2 pb-0.5">
-              {otherPubs.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => handleSelectPub(p.id)}
-                  className="shrink-0 px-2.5 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-full text-slate-600 dark:text-slate-300 font-bold hover:border-amber-400 transition-all cursor-pointer flex items-center gap-1"
-                >
-                  {p.isPrivate && <Lock className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
-                  {p.name} <span className="text-slate-400">({p.members.length})</span>
-                </button>
-              ))}
-            </div>
-          </details>
-        )}
 
         {/* Expandable Roster & Invites Drawer */}
         <AnimatePresence>
@@ -2459,6 +2386,119 @@ export default function PubHub({
           </button>
         </div>
       )}
+      {/* Switch Pub sheet - collapses pub switching, exploring, and creating into
+          one lightweight sheet reached by tapping the current pub's name, instead
+          of permanently taking up the top of the page. */}
+      <AnimatePresence>
+        {showPubSwitcher && (
+          <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-[110] flex items-start sm:items-center justify-center overflow-y-auto p-3 sm:p-4 py-6 animate-in fade-in duration-200">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md shadow-2xl flex flex-col overflow-hidden max-h-[85dvh]"
+            >
+              <div className="flex items-center justify-between border-b border-slate-800/80 px-5 py-4 shrink-0">
+                <h3 className="font-extrabold text-slate-100 text-sm sm:text-base flex items-center gap-2">
+                  🍺 Switch Pub
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowPubSwitcher(false)}
+                  className="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-slate-100 transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="overflow-y-auto p-4 space-y-4 custom-scrollbar flex-1 min-h-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPubSwitcher(false);
+                    setShowCreateModal(true);
+                  }}
+                  className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl border-2 border-dashed border-slate-700 text-slate-400 hover:text-amber-400 hover:border-amber-500 transition-all cursor-pointer font-bold text-xs"
+                >
+                  <Plus className="w-4 h-4" /> New Pub
+                </button>
+
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-wider text-slate-500 mb-2">
+                    Your Pubs ({myPubs.length})
+                  </p>
+                  <div className="space-y-1.5">
+                    {myPubs.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => { handleSelectPub(p.id); setShowPubSwitcher(false); }}
+                        className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl border-2 transition-all cursor-pointer text-left ${
+                          p.id === activePubId
+                            ? "bg-amber-500/10 border-amber-500"
+                            : "bg-slate-950 border-slate-800 hover:border-amber-500/50"
+                        }`}
+                      >
+                        <div className="relative shrink-0">
+                          <div className="w-9 h-9 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center">
+                            <PubEmblem emblem={p.emblem} sizeClass="w-5 h-5 text-base" />
+                          </div>
+                          {pinnedPubId === p.id && (
+                            <Pin className="w-3 h-3 text-amber-500 fill-amber-500 absolute -top-1 -right-1" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-extrabold text-slate-100 truncate flex items-center gap-1">
+                            {p.name}
+                            {p.isPrivate && <Lock className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
+                          </p>
+                          <p className="text-[10px] text-slate-400">
+                            {p.members.length} member{p.members.length === 1 ? "" : "s"}
+                          </p>
+                        </div>
+                        {p.id === activePubId && <Check className="w-4 h-4 text-amber-500 shrink-0" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {otherPubs.length > 0 && (
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-slate-500 mb-2">
+                      🧭 Explore Other Pubs
+                    </p>
+                    <div className="space-y-1.5">
+                      {otherPubs.map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => { handleSelectPub(p.id); setShowPubSwitcher(false); }}
+                          className="w-full flex items-center gap-2.5 p-2.5 rounded-xl border-2 bg-slate-950 border-slate-800 hover:border-amber-500/50 transition-all cursor-pointer text-left"
+                        >
+                          <div className="w-9 h-9 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0">
+                            <PubEmblem emblem={p.emblem} sizeClass="w-5 h-5 text-base" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-extrabold text-slate-100 truncate flex items-center gap-1">
+                              {p.name}
+                              {p.isPrivate && <Lock className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
+                            </p>
+                            <p className="text-[10px] text-slate-400">
+                              {p.members.length} member{p.members.length === 1 ? "" : "s"}
+                            </p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Modal to Establish Pub */}
       <AnimatePresence>
         {showCreateModal && (
