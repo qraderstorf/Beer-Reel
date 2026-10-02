@@ -553,16 +553,18 @@ export default function QuickLogWorkflow({
                   </div>
                 )}
 
-                {/* Hidden File Input - deliberately no `capture` attribute. That
-                    attribute skips straight to a minimal quick-capture UI on many
-                    Android browsers, which crops to a square with no way to change
-                    it. Leaving it off lets the OS show its normal camera/gallery
-                    chooser instead, so "Camera" opens the real camera app with
-                    normal photo dimensions and manual controls. */}
+                {/* Hidden File Input - `capture="environment"` sends "Log a Pint"
+                    straight to the camera with no OS chooser in between, by explicit
+                    choice: on some Android browsers this attribute opens a minimal
+                    quick-capture UI that shoots a fixed square instead of the full
+                    camera app, so photos may come back square-cropped on those
+                    devices. Direct-to-camera was worth that tradeoff over an extra
+                    tap through a Camera/Library picker every time. */}
                 <input
                   type="file"
                   ref={fileInputRef}
                   accept="image/*"
+                  capture="environment"
                   onChange={handleFileChange}
                   className="hidden"
                 />
