@@ -6,6 +6,7 @@ import { getMostDrankBeerForUser, compressImage, useRetryImage, convertHeicIfNee
 import UserAvatar from "./UserAvatar";
 import FriendsHub from "./FriendsHub";
 import WeeklyRecap from "./WeeklyRecap";
+import ProfilePintGrid from "./ProfilePintGrid";
 
 interface UserProfileManagerProps {
   users: UserProfile[];
@@ -839,6 +840,17 @@ export default function UserProfileManager({
                   </div>
                 )}
               </div>
+
+              {/* Pints Logged grid - mirrors whatever's already visible to this viewer
+                  in the main feed (same block rule), just gathered into one browsable
+                  place instead of scattered across the feed's scroll history. */}
+              {isTargetBlocked ? (
+                <div className="text-center text-xs text-slate-400 font-medium p-4 bg-slate-50 dark:bg-slate-950 rounded-xl">
+                  You've blocked @{targetUser.username} - their pints are hidden.
+                </div>
+              ) : (
+                <ProfilePintGrid username={targetUser.username} />
+              )}
 
               {/* Friends management */}
               {!isViewOnly && (
