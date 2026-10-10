@@ -2480,7 +2480,15 @@ app.get("/api/users/:username/stats", async (req, res) => {
       (u) => u.username.toLowerCase() === username.toLowerCase()
     );
 
-    if (existingUser && existingUser.stats) {
+    // goldenHourLabel is always present (even as "TBD") on anything computed by the
+    // current recalculateAndCacheUserStats - its absence means this cached blob
+    // predates that field (and whatever else shipped alongside it, like theUsualBeerName
+    // and firstPourCount) and was never recalculated since, not that the user genuinely
+    // has no data for those stats. Treating it as a schema fingerprint lets a stale
+    // cache self-heal the next time anyone views the profile, instead of silently
+    // serving an old shape forever until the user's next check-in happens to retrigger
+    // recalculation.
+    if (existingUser && existingUser.stats && existingUser.stats.goldenHourLabel !== undefined) {
       res.json(existingUser.stats);
       return;
     }
