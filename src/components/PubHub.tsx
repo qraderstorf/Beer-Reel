@@ -520,7 +520,11 @@ export default function PubHub({
   const otherPubs = useMemo(() => pubs.filter(p => !p.members.some(m => m.toLowerCase().trim() === userLower)), [pubs, userLower]);
   const otherUsers = useMemo(() => users.filter(u => u.username.toLowerCase().trim() !== userLower), [users, userLower]);
 
-  // Default pub ID if no specific selection is active
+  // Default pub ID if no specific selection is active. Deliberately does NOT fall
+  // back to "any pub on the platform" when someone has none of their own and no
+  // pin - that was dropping brand-new users into a random stranger's pub (private
+  // ones included, with nothing they could even do there) instead of the "pick or
+  // create a Pub" empty state the rest of this page already knows how to show.
   const defaultPubId = useMemo(() => {
     if (pinnedPubId && pubs.some(p => p.id === pinnedPubId)) {
       return pinnedPubId;
@@ -528,11 +532,8 @@ export default function PubHub({
     if (myPubs.length > 0) {
       return myPubs[0].id;
     }
-    if (pubs.length > 0) {
-      return pubs[0].id;
-    }
     return "";
-  }, [pinnedPubId, myPubs, pubs]);
+  }, [pinnedPubId, myPubs]);
 
   // Local selection override state
   const [localPubId, setLocalPubId] = useState<string | null>(null);

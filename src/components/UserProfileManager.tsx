@@ -578,7 +578,7 @@ export default function UserProfileManager({
         initial={{ opacity: 0, scale: 0.95, y: 15 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 15 }}
-        className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col"
+        className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-2xl w-full max-h-[92dvh] overflow-hidden flex flex-col"
       >
         {/* Modal Header */}
         <div className="p-5 border-b border-slate-150 flex items-center justify-between bg-slate-50/50">
@@ -742,6 +742,20 @@ export default function UserProfileManager({
                 </div>
               )}
 
+              {/* Pints Logged grid - moved up near the top, right after who-this-is:
+                  it's the most "this person" part of the page (their actual posts),
+                  so it shouldn't be buried below the stats cards and the recap
+                  banner. Mirrors whatever's already visible to this viewer in the
+                  main feed (same block rule), just gathered into one browsable
+                  place instead of scattered across the feed's scroll history. */}
+              {isTargetBlocked ? (
+                <div className="text-center text-xs text-slate-400 font-medium p-4 bg-slate-50 dark:bg-slate-950 rounded-xl">
+                  You've blocked @{targetUser.username} - their pints are hidden.
+                </div>
+              ) : (
+                <ProfilePintGrid username={targetUser.username} />
+              )}
+
               {/* Weekly Recap trigger */}
               <button
                 onClick={() => setShowWeeklyRecap(true)}
@@ -840,17 +854,6 @@ export default function UserProfileManager({
                   </div>
                 )}
               </div>
-
-              {/* Pints Logged grid - mirrors whatever's already visible to this viewer
-                  in the main feed (same block rule), just gathered into one browsable
-                  place instead of scattered across the feed's scroll history. */}
-              {isTargetBlocked ? (
-                <div className="text-center text-xs text-slate-400 font-medium p-4 bg-slate-50 dark:bg-slate-950 rounded-xl">
-                  You've blocked @{targetUser.username} - their pints are hidden.
-                </div>
-              ) : (
-                <ProfilePintGrid username={targetUser.username} />
-              )}
 
               {/* Friends management */}
               {!isViewOnly && (
