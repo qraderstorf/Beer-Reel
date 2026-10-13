@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Camera, Star, X, Check, Loader2, Award, Percent, MessageSquare, RefreshCw, Sparkles, Plus, History, MapPin, LocateFixed, ChevronDown } from "lucide-react";
+import { Camera, Star, X, Check, Loader2, Percent, Sparkles, Plus, History, MapPin, LocateFixed, ChevronDown } from "lucide-react";
 import { BeerLog, UserProfile } from "../types";
 import { PRELOADED_BEERS, PreloadedBeer, normalizeBeerName, searchBeers } from "../data/beerCatalog";
 import { compressAndResizeImage } from "../utils";

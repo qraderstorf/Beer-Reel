@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Check, Calendar, Sparkles, X, Smile, Trash2, Trophy, Flame, Award, Shield, Heart, ZoomIn, ZoomOut, Pencil, ArrowLeft, Ban, Flag } from "lucide-react";
+import { Check, Calendar, X, Smile, Trash2, Trophy, ZoomIn, ZoomOut, Pencil, ArrowLeft, Ban, Flag } from "lucide-react";
 import { UserProfile, BeerLog, ContentReport, isSeymoreBeers } from "../types";
 import { getMostDrankBeerForUser, compressImage, useRetryImage, convertHeicIfNeeded } from "../utils";
 import UserAvatar from "./UserAvatar";

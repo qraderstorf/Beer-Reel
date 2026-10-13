@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
-import { Star, MessageSquare, Flame, Trash2, Heart, Search, Award, RefreshCw, Edit, Camera, Siren, Plus, Smile, X, Flag, MapPin, Globe, Users as UsersIcon, MoreHorizontal } from "lucide-react";
+import { Star, MessageSquare, Trash2, Search, Award, RefreshCw, Edit, Camera, Plus, X, Flag, MapPin, Globe, Users as UsersIcon, MoreHorizontal } from "lucide-react";
 import { BeerLog, UserProfile, isSeymoreBeers } from "../types";
 import { useRetryImage } from "../utils";
 import UserAvatar from "./UserAvatar";

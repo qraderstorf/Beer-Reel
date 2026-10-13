@@ -307,62 +307,6 @@ app.get("/api/image/:filename", async (req, res) => {
     .pipe(res);
 });
 
-// TEMPORARY diagnostic endpoint - visit this URL directly in any browser to see exactly
-// why photo uploads are failing, without needing Cloud Console log access. Safe to remove
-// once uploads are confirmed working again. Does a real tiny write+read+delete against
-// Storage via both the Admin SDK and the client SDK and reports the raw error from each.
-app.get("/api/debug-storage", async (req, res) => {
-  const report: any = {
-    adminAppsInitialized: getAdminApps().length > 0,
-    adminCredentialSource,
-    configuredStorageBucket: null,
-    adminSdk: { attempted: false, success: false, bucketName: null, error: null },
-    clientSdk: { attempted: false, success: false, error: null }
-  };
-
-  try {
-    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-      report.configuredStorageBucket = config.storageBucket || null;
-    }
-  } catch (e) {}
-
-  const testFilename = `debug/storage-test-${Date.now()}.txt`;
-  const testContent = "beerreel storage diagnostic write";
-
-  if (getAdminApps().length > 0) {
-    report.adminSdk.attempted = true;
-    try {
-      const bucket = getAdminStorage().bucket();
-      report.adminSdk.bucketName = bucket.name;
-      const file = bucket.file(testFilename);
-      await file.save(Buffer.from(testContent), { metadata: { contentType: "text/plain" } });
-      const [contents] = await file.download();
-      await file.delete().catch(() => {});
-      report.adminSdk.success = contents.toString() === testContent;
-    } catch (err: any) {
-      report.adminSdk.error = { message: err?.message || String(err), code: err?.code || null };
-    }
-  }
-
-  try {
-    const storage = getStorageInstance();
-    if (storage) {
-      report.clientSdk.attempted = true;
-      const storageRef = ref(storage, testFilename);
-      await uploadString(storageRef, testContent);
-      await getDownloadURL(storageRef);
-      report.clientSdk.success = true;
-    }
-  } catch (err: any) {
-    report.clientSdk.error = { message: err?.message || String(err), code: err?.code || null };
-  }
-
-  res.setHeader("Content-Type", "application/json");
-  res.send(JSON.stringify(report, null, 2));
-});
-
 // Endpoint to upload base64 images and get back a short Storage download URL
 app.post("/api/upload-image", async (req, res) => {
   try {
@@ -4273,35 +4217,6 @@ app.post("/api/pubs/:id/widgets", async (req, res) => {
   }
 
   pub.widgets = cleanWidgets;
-  const saved = await savePub(pub);
-  res.json(saved);
-});
-
-// POST Update Pub Privacy - owner only, since this controls who can get in
-app.post("/api/pubs/:id/privacy", async (req, res) => {
-  const { id } = req.params;
-  const currentUser = (req.body.currentUser || "").toString().trim();
-  const isPrivate = !!req.body.isPrivate;
-
-  if (!currentUser) {
-    res.status(400).json({ error: "currentUser is required." });
-    return;
-  }
-
-  const allPubsList = await getAllPubs();
-  const pub = allPubsList.find((p) => p.id === id);
-  if (!pub) {
-    res.status(404).json({ error: "Pub not found" });
-    return;
-  }
-
-  const isOwner = pub.owner.toLowerCase().trim() === currentUser.toLowerCase().trim();
-  if (!isOwner && !isSeymoreBeers(currentUser)) {
-    res.status(403).json({ error: "Only the Pub's owner can change its privacy setting." });
-    return;
-  }
-
-  pub.isPrivate = isPrivate;
   const saved = await savePub(pub);
   res.json(saved);
 });

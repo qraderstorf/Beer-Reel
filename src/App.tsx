@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Beer, BarChart3, Activity, Users, Compass, ChevronDown, Smile, RefreshCw, LogOut, Bell, Smartphone, Database, Cloud, Flame, ShieldAlert, Tag, MessageSquare, Heart, Sparkles, UserPlus, UserCheck } from "lucide-react";
+import { Beer, BarChart3, Activity, Users, Compass, Smile, RefreshCw, LogOut, Bell, Smartphone, Database, Flame, ShieldAlert, Tag, MessageSquare, Heart, Sparkles, UserPlus, UserCheck } from "lucide-react";
 import { BeerLog, UserProfile, AppNotification, Pub } from "./types";
 import { getMostDrankBeerForUser } from "./utils";
 import ActivityFeed from "./components/ActivityFeed";

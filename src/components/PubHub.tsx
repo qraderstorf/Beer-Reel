@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { 
-  Users, Plus, Trash2, LogOut, Check, Shield, AlertCircle,
+import {
+  Users, Plus, LogOut, Check, Shield, AlertCircle,
   Sparkles, Edit2, Image, Smile, Send, UserPlus, X,
-  Trophy, Award, Zap, Moon, Coffee, Crown, ArrowLeft, TrendingUp,
-  Beer, Star, Calendar, ChevronRight, ChevronDown, Pin, Filter, BarChart3, LineChart as LineChartIcon,
-  MessageSquare, Flame, Settings2, Gauge, Target, Lock, Globe
+  Trophy, Award, Zap, Moon, Coffee, Crown,
+  Beer, Star, ChevronRight, ChevronDown, Pin, Gauge,
+  MessageSquare, Flame, Settings2, Target, Lock, Globe
 } from "lucide-react";
 import {
   ResponsiveContainer,
