@@ -568,6 +568,15 @@ export default function PubHub({
     return pubs.find(p => p.id === activePubId);
   }, [pubs, activePubId]);
 
+  // Trophy Wall is private-Pub-only (see the zone switcher below) - if someone
+  // was looking at it and then switches to a public Pub, fall back to On Tap
+  // rather than leaving them on a tab that no longer has a way to get back to.
+  useEffect(() => {
+    if (activePub && !activePub.isPrivate && activeTab === "superlatives") {
+      setActiveTab("widgets");
+    }
+  }, [activePub, activeTab]);
+
   useEffect(() => {
     // Public Pubs don't show chat at all, so there's no preview strip to fetch for.
     if (!activePubId || activePub?.isPrivate === false) {
@@ -1521,13 +1530,9 @@ export default function PubHub({
     <div className="space-y-3 animate-in fade-in duration-200">
       {/* Light the Beacons - the headline action of this page: rally friends to a pub.
           Both this and Banter & Chat below are private-Pub-only - a rally broadcasts
-          into the pub's chat, so it has no real home in a public Pub with chat hidden. */}
-      {activePub && !activePub.isPrivate ? (
-        <div className="w-full flex items-center gap-3 px-4 py-4 bg-slate-100 dark:bg-slate-900 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl text-slate-400">
-          <Flame className="w-5 h-5 shrink-0" />
-          <span className="text-xs font-bold">Beacon rallies are for private Pubs only.</span>
-        </div>
-      ) : activePub ? (
+          into the pub's chat, so it has no real home in a public Pub with chat hidden.
+          Just omitted outright for public Pubs, same as chat below. */}
+      {activePub && !activePub.isPrivate ? null : activePub ? (
         <button
           type="button"
           onClick={() => {
@@ -1977,6 +1982,13 @@ export default function PubHub({
         <div className="flex-1 h-px bg-gradient-to-r from-amber-500/40 via-amber-500/10 to-transparent" />
       </div>
 
+      {/* Trophy Wall calls out specific members by name with personal stats
+          ("98% Guinness foam", late-night check-in counts) for banter - fun
+          among friends who opted into that, not something strangers in a
+          public Pub signed up for. So there's nothing to switch between on a
+          public Pub - On Tap is the only tab, and the switcher itself is
+          skipped rather than shown with one option. */}
+      {activePub && !activePub.isPrivate ? null : (
       <div className="flex items-center gap-1.5 p-1.5 bg-amber-50 dark:bg-slate-900/90 border border-amber-200/60 dark:border-amber-900/40 rounded-2xl shadow-2xs">
         <button
           type="button"
@@ -2004,6 +2016,7 @@ export default function PubHub({
           <span>Trophy Wall</span>
         </button>
       </div>
+      )}
 
       {/* Messages */}
       {error && (
@@ -2020,7 +2033,7 @@ export default function PubHub({
       )}
 
       {/* TROPHY WALL / SUPERLATIVES TAB */}
-      {activeTab === "superlatives" && pubSuperlatives && (
+      {activeTab === "superlatives" && pubSuperlatives && (!activePub || activePub.isPrivate) && (
         <div className="bg-gradient-to-br from-amber-50 to-white dark:from-amber-950/20 dark:to-slate-900 rounded-2xl border border-amber-200/70 dark:border-amber-900/40 shadow-xs p-4 sm:p-5 space-y-3.5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-amber-100 dark:border-amber-900/30 pb-3 gap-2.5">
             <div>
