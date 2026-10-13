@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-        <string>BeerReal</string>
+        <string>BeerReel</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -67,8 +67,6 @@
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>BeerReal uses your camera to take a photo of the pint you're logging.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>BeerReal lets you choose a photo from your library to attach to a pint check-in.</string>
+	<string>BeerReel uses your camera to take a photo of the pint you're logging.</string>
 </dict>
 </plist>

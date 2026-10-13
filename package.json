@@ -9,11 +9,13 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "cap:sync": "vite build && npx cap sync ios",
-    "cap:icons": "npx capacitor-assets generate --ios",
-    "cap:open": "npx cap open ios"
+    "cap:sync": "vite build && npx cap sync",
+    "cap:icons": "npx capacitor-assets generate",
+    "cap:open:ios": "npx cap open ios",
+    "cap:open:android": "npx cap open android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
     "@capacitor/core": "^8.5.0",
     "@capacitor/ios": "^8.5.0",
     "@google/genai": "^2.4.0",
