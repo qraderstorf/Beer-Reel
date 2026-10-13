@@ -123,25 +123,38 @@ function PintDetailModal({ log, onClose }: { log: BeerLog; onClose: () => void }
   );
 }
 
-export default function ProfilePintGrid({ username }: { username: string }) {
-  const [logs, setLogs] = useState<BeerLog[]>([]);
+interface ProfilePintGridProps {
+  // Fetch mode (profile use): paginated GET /api/beers?user=... by username.
+  username?: string;
+  // Provided mode (e.g. a public Pub's feed): render this exact, already-filtered
+  // list directly - no fetch, no pagination, caller owns what's in it.
+  logs?: BeerLog[];
+  title?: string;
+  emptyText?: string;
+}
+
+export default function ProfilePintGrid({ username, logs: providedLogs, title = "Pints Logged", emptyText = "No pints logged yet." }: ProfilePintGridProps) {
+  const isProvidedMode = providedLogs !== undefined;
+
+  const [fetchedLogs, setFetchedLogs] = useState<BeerLog[]>([]);
   const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const [loading, setLoading] = useState(true);
+  const [fetchHasMore, setFetchHasMore] = useState(true);
+  const [fetchLoading, setFetchLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [selectedLog, setSelectedLog] = useState<BeerLog | null>(null);
 
   // Own paginated fetch, deliberately not sharing App.tsx's Feed-tab filter state -
   // opening a profile shouldn't be able to silently hijack whatever someone else was
-  // browsing (a search, a pub filter) in the main feed.
+  // browsing (a search, a pub filter) in the main feed. Skipped entirely in provided mode.
   useEffect(() => {
+    if (isProvidedMode || !username) return;
     let isCancelled = false;
-    setLogs([]);
+    setFetchedLogs([]);
     setOffset(0);
-    setHasMore(true);
-    setLoading(true);
-    setError(null);
+    setFetchHasMore(true);
+    setFetchLoading(true);
+    setFetchError(null);
 
     (async () => {
       try {
@@ -150,33 +163,33 @@ export default function ProfilePintGrid({ username }: { username: string }) {
         const data = await res.json();
         if (isCancelled) return;
         const fetched: BeerLog[] = (data.beers || []).filter((l: BeerLog) => !isImposterLog(l));
-        setLogs(fetched);
+        setFetchedLogs(fetched);
         setOffset((data.beers || []).length);
-        setHasMore(!!data.hasMore);
+        setFetchHasMore(!!data.hasMore);
       } catch (err) {
         console.error("[ProfilePintGrid] Failed to load pints:", err);
-        if (!isCancelled) setError("Couldn't load pints right now.");
+        if (!isCancelled) setFetchError("Couldn't load pints right now.");
       } finally {
-        if (!isCancelled) setLoading(false);
+        if (!isCancelled) setFetchLoading(false);
       }
     })();
 
     return () => {
       isCancelled = true;
     };
-  }, [username]);
+  }, [username, isProvidedMode]);
 
   const handleLoadMore = async () => {
-    if (loadingMore || !hasMore) return;
+    if (isProvidedMode || !username || loadingMore || !fetchHasMore) return;
     setLoadingMore(true);
     try {
       const res = await fetch(`/api/beers?user=${encodeURIComponent(username)}&limit=${PAGE_SIZE}&offset=${offset}`);
       if (!res.ok) throw new Error("Failed to load more pints");
       const data = await res.json();
       const fetched: BeerLog[] = (data.beers || []).filter((l: BeerLog) => !isImposterLog(l));
-      setLogs((prev) => [...prev, ...fetched]);
+      setFetchedLogs((prev) => [...prev, ...fetched]);
       setOffset((prev) => prev + (data.beers || []).length);
-      setHasMore(!!data.hasMore);
+      setFetchHasMore(!!data.hasMore);
     } catch (err) {
       console.error("[ProfilePintGrid] Failed to load more pints:", err);
     } finally {
@@ -184,10 +197,15 @@ export default function ProfilePintGrid({ username }: { username: string }) {
     }
   };
 
+  const logs = isProvidedMode ? providedLogs : fetchedLogs;
+  const loading = isProvidedMode ? false : fetchLoading;
+  const hasMore = isProvidedMode ? false : fetchHasMore;
+  const error = isProvidedMode ? null : fetchError;
+
   return (
     <div className="space-y-2.5">
       <span className="block text-xs font-bold uppercase tracking-wider text-slate-400">
-        Pints Logged
+        {title}
       </span>
 
       {loading ? (
@@ -202,7 +220,7 @@ export default function ProfilePintGrid({ username }: { username: string }) {
         </div>
       ) : logs.length === 0 ? (
         <div className="text-center text-xs text-slate-400 font-medium p-4 bg-slate-50 dark:bg-slate-950 rounded-xl">
-          No pints logged yet.
+          {emptyText}
         </div>
       ) : (
         <>

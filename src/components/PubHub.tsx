@@ -20,6 +20,7 @@ import {
   Legend
 } from "recharts";
 import { Pub, UserProfile, BeerLog, PubChatMessage, PubWidgetConfig } from "../types";
+import ProfilePintGrid from "./ProfilePintGrid";
 import { getMostDrankBeerForUser, isImposterLog, isUnspecifiedBeerName, useRetryImage } from "../utils";
 import UserAvatar from "./UserAvatar";
 
@@ -847,6 +848,26 @@ export default function PubHub({
     if (!activePub) return [];
     const members = activePub.members;
     return combinedLogs.filter(log => members.includes(log.user) && !isImposterLog(log));
+  }, [activePub, combinedLogs]);
+
+  // A public Pub's whole "what's happening here" is this feed, not the gauges/Trophy
+  // Wall above (both private-Pub-only). Deliberately NOT the same thing as
+  // activePubFilteredLogs: that shows a member's entire lifetime history the moment
+  // they join, which is fine for a small private friend group but would mean every
+  // new member of a public Pub instantly dumping their whole personal post history in.
+  // Scoped to only what each member posted after they actually joined, so it reads
+  // as "recent activity in this Pub" instead of a history dump.
+  const publicPubFeedLogs = useMemo(() => {
+    if (!activePub || activePub.isPrivate) return [];
+    const joinedMap = activePub.memberJoinedAt || {};
+    return combinedLogs
+      .filter((log) => {
+        if (!activePub.members.includes(log.user) || isImposterLog(log)) return false;
+        const joinedAt = joinedMap[log.user];
+        if (!joinedAt) return false;
+        return new Date(log.date).getTime() >= new Date(joinedAt).getTime();
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [activePub, combinedLogs]);
 
   // ---------------------------------------------------------------------------
@@ -1750,7 +1771,7 @@ export default function PubHub({
                 <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0 group-hover:text-amber-500 transition-colors" />
               </h1>
               <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium truncate">
-                Host: @{activePub?.owner || "System"} • <span className="font-bold text-amber-500">{activePubFilteredLogs.length} Pints</span>
+                Host: @{activePub?.owner || "System"} • <span className="font-bold text-amber-500">{(activePub?.isPrivate ? activePubFilteredLogs.length : publicPubFeedLogs.length)} Pints</span>
               </p>
             </div>
           </button>
@@ -2150,7 +2171,7 @@ export default function PubHub({
       )}
 
       {/* ON TAP - GAUGE WIDGETS (customizable), framed like a chalkboard board */}
-      {activeTab === "widgets" && (
+      {activeTab === "widgets" && (!activePub || activePub.isPrivate) && (
         <div className="space-y-3 p-3 sm:p-4 rounded-3xl bg-gradient-to-b from-emerald-50 to-transparent dark:from-emerald-950/25 dark:to-transparent border border-emerald-200/60 dark:border-emerald-900/30">
           {activeWidgets.map((widget) => {
             const catalogEntry = WIDGET_CATALOG.find((c) => c.type === widget.type);
@@ -2413,6 +2434,18 @@ export default function PubHub({
           </button>
         </div>
       )}
+
+      {/* Public Pub's "On Tap" is a feed instead of gauges - see publicPubFeedLogs above. */}
+      {activePub && !activePub.isPrivate && (
+        <div className="p-3 sm:p-4 rounded-3xl bg-gradient-to-b from-emerald-50 to-transparent dark:from-emerald-950/25 dark:to-transparent border border-emerald-200/60 dark:border-emerald-900/30">
+          <ProfilePintGrid
+            logs={publicPubFeedLogs}
+            title={`Recent in ${activePub.name}`}
+            emptyText="No pints posted here yet — be the first!"
+          />
+        </div>
+      )}
+
       {/* Switch Pub sheet - collapses pub switching, exploring, and creating into
           one lightweight sheet reached by tapping the current pub's name, instead
           of permanently taking up the top of the page. */}

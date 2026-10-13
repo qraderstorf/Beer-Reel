@@ -4025,6 +4025,9 @@ app.post("/api/pubs", async (req, res) => {
     emblem: emblem !== undefined ? emblem : (existingPub ? existingPub.emblem : ""),
     isPrivate: isPrivate !== undefined ? !!isPrivate : !!existingPub?.isPrivate,
     ...(existingPub?.widgets ? { widgets: existingPub.widgets } : {}),
+    // A brand-new Pub's owner "joins" the moment it's created; an edit keeps whatever
+    // join times already exist rather than resetting them.
+    memberJoinedAt: existingPub?.memberJoinedAt ?? { [owner]: new Date().toISOString() },
   };
 
   const saved = await savePub(pub);
@@ -4076,6 +4079,7 @@ app.post("/api/pubs/:id/join", async (req, res) => {
   // Add to members if not already
   if (!isAlreadyMember) {
     pub.members.push(username);
+    pub.memberJoinedAt = { ...(pub.memberJoinedAt || {}), [username]: new Date().toISOString() };
   }
 
   // Remove from invited

@@ -93,6 +93,7 @@ export interface Pub {
   emblem?: string;
   widgets?: PubWidgetConfig[]; // customizable Awards-tab gauge widgets; undefined = default Guinness gauge
   isPrivate?: boolean; // undefined/false = public (anyone can join); true = invite-only
+  memberJoinedAt?: Record<string, string>; // username -> ISO date joined; used to scope a public Pub's feed to "since you joined" instead of a member's whole history
 }
 
 export interface PubChatMessage {
