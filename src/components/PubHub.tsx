@@ -569,7 +569,8 @@ export default function PubHub({
   }, [pubs, activePubId]);
 
   useEffect(() => {
-    if (!activePubId) {
+    // Public Pubs don't show chat at all, so there's no preview strip to fetch for.
+    if (!activePubId || activePub?.isPrivate === false) {
       setLatestPubMessage(null);
       return;
     }
@@ -584,7 +585,7 @@ export default function PubHub({
     return () => {
       cancelled = true;
     };
-  }, [activePubId, chatRefreshKey]);
+  }, [activePubId, chatRefreshKey, activePub?.isPrivate]);
 
   // Who can be rallied: current pub members plus the caller's own friends, so a
   // beacon can invite people out even if they haven't joined this Pub group yet.
@@ -1518,8 +1519,15 @@ export default function PubHub({
   // ===========================================================================
   return (
     <div className="space-y-3 animate-in fade-in duration-200">
-      {/* Light the Beacons - the headline action of this page: rally friends to a pub */}
-      {activePub ? (
+      {/* Light the Beacons - the headline action of this page: rally friends to a pub.
+          Both this and Banter & Chat below are private-Pub-only - a rally broadcasts
+          into the pub's chat, so it has no real home in a public Pub with chat hidden. */}
+      {activePub && !activePub.isPrivate ? (
+        <div className="w-full flex items-center gap-3 px-4 py-4 bg-slate-100 dark:bg-slate-900 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl text-slate-400">
+          <Flame className="w-5 h-5 shrink-0" />
+          <span className="text-xs font-bold">Beacon rallies are for private Pubs only.</span>
+        </div>
+      ) : activePub ? (
         <button
           type="button"
           onClick={() => {
@@ -1913,7 +1921,11 @@ export default function PubHub({
       )}
 
       {/* Banter & Chat - minimized to a collapsible strip. Beacon calls land
-          here as regular messages, so lighting a beacon auto-expands it. */}
+          here as regular messages, so lighting a beacon auto-expands it.
+          Private Pubs only - chat here has no per-message report mechanism
+          the way posts and users do, which is a real moderation gap once
+          it's a room full of strangers rather than friends you invited. */}
+      {activePub && !activePub.isPrivate ? null : (
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-amber-200/70 dark:border-amber-900/40 shadow-xs overflow-hidden">
         <button
           type="button"
@@ -1955,6 +1967,7 @@ export default function PubHub({
           </div>
         )}
       </div>
+      )}
 
       {/* Zone: On Tap / Trophy Wall - the stats board and the honors case, one
           tab switcher between them since they're both "what's happening here" */}
