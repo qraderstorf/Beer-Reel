@@ -1338,7 +1338,16 @@ export default function UserProfileManager({
         </div>
 
         {/* Modal Footer */}
-        <div className="p-4 border-t border-slate-150 bg-slate-50/50 flex items-center justify-center">
+        <div className="p-4 border-t border-slate-150 bg-slate-50/50 flex items-center justify-center gap-3">
+          <a
+            href="/terms.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] text-slate-400 hover:text-amber-600 font-semibold hover:underline"
+          >
+            Terms of Service
+          </a>
+          <span className="text-slate-300">·</span>
           <a
             href="/privacy.html"
             target="_blank"

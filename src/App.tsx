@@ -1666,11 +1666,6 @@ export default function App() {
                               typeIcon = <ShieldAlert className="w-2.5 h-2.5" />;
                               badgeLabel = "Imposter Outed";
                               badgeStyle = "bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-400 border-rose-100 dark:border-rose-900/40";
-                            } else if (notif.type === "bender" || notif.text.includes("BENDER ALERT")) {
-                              typeColorClass = "bg-red-500 text-white animate-pulse shadow-red-300/30";
-                              typeIcon = <Flame className="w-2.5 h-2.5" />;
-                              badgeLabel = "Bender";
-                              badgeStyle = "bg-red-50 text-red-600 dark:bg-red-950/40 dark:text-red-400 border-red-100 dark:border-red-900/40";
                             } else if (notif.type === "first_pour" || notif.text.includes("first pint of the day")) {
                               typeColorClass = "bg-amber-500 text-white shadow-amber-300/30";
                               typeIcon = <Sparkles className="w-2.5 h-2.5" />;

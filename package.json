@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
+    "@capacitor/camera": "^8.2.5",
     "@capacitor/core": "^8.5.0",
     "@capacitor/ios": "^8.5.0",
     "@google/genai": "^2.4.0",

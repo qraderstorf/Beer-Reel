@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Camera, Star, X, Check, Loader2, Percent, Sparkles, Plus, History, MapPin, LocateFixed, ChevronDown } from "lucide-react";
+import { Capacitor } from "@capacitor/core";
+import { Camera as NativeCamera, CameraResultType, CameraSource } from "@capacitor/camera";
 import { BeerLog, UserProfile } from "../types";
 import { PRELOADED_BEERS, PreloadedBeer, normalizeBeerName, searchBeers } from "../data/beerCatalog";
 import { compressAndResizeImage } from "../utils";
@@ -147,38 +149,68 @@ export default function QuickLogWorkflow({
     setError(null);
   };
 
-  const triggerCamera = () => {
+  // Shared tail end of "got a photo file, now what" - used by both the native
+  // Capacitor camera path and the plain web <input> path below, so resizing/
+  // compression and the capture->preview transition stay identical either way.
+  const processImageFile = async (file: File) => {
+    const isImage = file.type.startsWith("image/") || /\.(jpg|jpeg|png|webp|gif|heic|heif)$/i.test(file.name);
+    if (!isImage) {
+      setError("Please upload or take a valid image file.");
+      return;
+    }
+
+    setIsProcessingPhoto(true);
     setError(null);
-    fileInputRef.current?.click();
+    try {
+      const base64 = await compressAndResizeImage(file);
+      setCapturedPhoto(base64);
+      setStep("preview");
+      // Kick off location capture the moment there's a photo, rather than
+      // waiting for someone to tap "use my location" - gives it the most
+      // possible lead time to resolve before Post is tapped, without ever
+      // making Post itself wait on it.
+      autoFillLocation();
+    } catch (err) {
+      console.error(err);
+      setError("Failed to process photo. Please try again.");
+      setStep("capture");
+    } finally {
+      setIsProcessingPhoto(false);
+    }
+  };
+
+  // On a native build, go through the real Capacitor Camera plugin instead of
+  // the HTML file input - it's a direct, reliable jump to the system camera
+  // (no risk of an Android WebView showing a chooser instead), and gives real
+  // native camera UI/permissions rather than a web shim. Web stays on the
+  // plain <input capture> flow further below, which already covers it.
+  const triggerCamera = async () => {
+    setError(null);
+    if (!Capacitor.isNativePlatform()) {
+      fileInputRef.current?.click();
+      return;
+    }
+
+    try {
+      const photo = await NativeCamera.getPhoto({
+        resultType: CameraResultType.DataUrl,
+        source: CameraSource.Camera,
+        quality: 90,
+        saveToGallery: false,
+      });
+      if (!photo.dataUrl) return;
+      const blob = await (await fetch(photo.dataUrl)).blob();
+      const file = new File([blob], `pint-${Date.now()}.jpeg`, { type: blob.type || "image/jpeg" });
+      await processImageFile(file);
+    } catch (err) {
+      // User backing out of the camera throws here too - that's a cancel, not a failure.
+      console.log("[QuickLogWorkflow] Native camera cancelled or failed:", err);
+    }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      const isImage = file.type.startsWith("image/") || /\.(jpg|jpeg|png|webp|gif|heic|heif)$/i.test(file.name);
-      if (!isImage) {
-        setError("Please upload or take a valid image file.");
-        return;
-      }
-
-      setIsProcessingPhoto(true);
-      setError(null);
-      try {
-        const base64 = await compressAndResizeImage(file);
-        setCapturedPhoto(base64);
-        setStep("preview");
-        // Kick off location capture the moment there's a photo, rather than
-        // waiting for someone to tap "use my location" - gives it the most
-        // possible lead time to resolve before Post is tapped, without ever
-        // making Post itself wait on it.
-        autoFillLocation();
-      } catch (err) {
-        console.error(err);
-        setError("Failed to process photo. Please try again.");
-        setStep("capture");
-      } finally {
-        setIsProcessingPhoto(false);
-      }
+      await processImageFile(e.target.files[0]);
     }
   };
 

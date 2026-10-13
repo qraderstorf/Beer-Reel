@@ -31,6 +31,7 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
   const [newBio, setNewBio] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newPhotoUrl, setNewPhotoUrl] = useState<string | null>(null);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
 
   // Recovery-code modal state - shown once right after a successful signup (this app
   // has no email infra, so the recovery code is the only self-service account-recovery
@@ -183,6 +184,10 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
     }
     if (newPassword.length < 4) {
       setError("Password must be at least 4 characters.");
+      return;
+    }
+    if (!agreedToTerms) {
+      setError("Please agree to the Terms of Service and Privacy Policy to continue.");
       return;
     }
 
@@ -638,10 +643,30 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
                   </p>
                 </div>
 
+                <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={agreedToTerms}
+                    onChange={(e) => setAgreedToTerms(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 shrink-0 accent-amber-500 cursor-pointer"
+                  />
+                  <span className="text-[11px] text-slate-500 font-medium leading-relaxed">
+                    I agree to the{" "}
+                    <a href="/terms.html" target="_blank" rel="noopener noreferrer" className="text-amber-600 font-bold hover:underline">
+                      Terms of Service
+                    </a>{" "}
+                    and{" "}
+                    <a href="/privacy.html" target="_blank" rel="noopener noreferrer" className="text-amber-600 font-bold hover:underline">
+                      Privacy Policy
+                    </a>
+                    , and confirm I'm of legal drinking age.
+                  </span>
+                </label>
+
                 <div>
                   <button
                     type="submit"
-                    disabled={loading}
+                    disabled={loading || !agreedToTerms}
                     className="w-full flex justify-center py-2.5 px-4 border border-transparent rounded-xl shadow-sm text-sm font-bold text-white bg-amber-500 hover:bg-amber-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500 transition-colors disabled:opacity-50"
                   >
                     {loading ? "Creating..." : "Create Profile & Join 🍻"}
@@ -653,6 +678,10 @@ export default function LoginScreen({ users, onLoginSuccess, onProfileCreated }:
         </div>
 
         <p className="mt-6 text-center text-[11px] text-slate-400 font-semibold">
+          <a href="/terms.html" target="_blank" rel="noopener noreferrer" className="hover:text-amber-600 hover:underline">
+            Terms of Service
+          </a>
+          {" "}·{" "}
           <a href="/privacy.html" target="_blank" rel="noopener noreferrer" className="hover:text-amber-600 hover:underline">
             Privacy Policy
           </a>
