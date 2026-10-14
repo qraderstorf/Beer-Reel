@@ -163,6 +163,28 @@ export default function App() {
     );
   };
 
+  // Public visibility is opt-in: posting shows up in the Everyone tab only once
+  // you've joined at least one public Pub (BeerReel HQ being the obvious one) -
+  // joining is the explicit "yes, strangers can see my pints" signal, rather than
+  // every account being publicly visible by default the moment it's created.
+  // Friends-scope is unaffected - a friend connection is its own, more direct form
+  // of consent, so it already shows friends' posts regardless of this.
+  const publiclyVisibleUsernamesLower = useMemo(() => {
+    const set = new Set<string>();
+    pubs.forEach((p) => {
+      if (p.isPrivate) return;
+      (p.members || []).forEach((m) => set.add(m.toLowerCase()));
+    });
+    return set;
+  }, [pubs]);
+
+  const applyPublicVisibilityFilter = (list: BeerLog[]): BeerLog[] => {
+    if (feedScope !== "everyone") return list;
+    return list.filter(
+      (log) => log.user.toLowerCase() === currentUser.toLowerCase() || publiclyVisibleUsernamesLower.has(log.user.toLowerCase())
+    );
+  };
+
   // Ensure selectedPubId matches an existing pub or fallback to global
   useEffect(() => {
     if (!currentUser || pubs.length === 0) return;
@@ -1996,7 +2018,7 @@ export default function App() {
 
               {activeTab === "feed" && (
                 <ActivityFeed
-                  logs={applyFriendsFilter(applyBlockFilter(isFilterActive ? filteredBeers : logs))}
+                  logs={applyPublicVisibilityFilter(applyFriendsFilter(applyBlockFilter(isFilterActive ? filteredBeers : logs)))}
                   users={users}
                   currentUser={currentUser}
                   selectedUserFilter={selectedUserFilter}
